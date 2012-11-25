@@ -1,3 +1,22 @@
+From 90cc442e88f1afe1a25593859e087e89e373df0d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
+Date: Sun, 25 Nov 2012 18:28:38 +0100
+Subject: [PATCH] Geolocation based on haproxy 1.4.22
+
+---
+ include/proto/acl.h        |  4 +++
+ include/proto/buffers.h    |  1 +
+ include/proto/proto_http.h |  4 +++
+ include/types/acl.h        |  1 +
+ include/types/proto_http.h |  1 +
+ include/types/proxy.h      |  8 +++++
+ src/acl.c                  | 56 +++++++++++++++++++++++++++--
+ src/buffers.c              | 37 ++++++++++++++++++++
+ src/cfgparse.c             | 72 ++++++++++++++++++++++++++++++++++++++
+ src/haproxy.c              |  3 ++
+ src/proto_http.c           | 87 ++++++++++++++++++++++++++++++++++++++++++++--
+ 11 files changed, 269 insertions(+), 5 deletions(-)
+
 diff --git a/include/proto/acl.h b/include/proto/acl.h
 index 9b556ba..73ba79e 100644
 --- a/include/proto/acl.h
@@ -65,7 +84,7 @@ index 09d4dd8..45f3b6d 100644
  	int cookie_last_date;           /* if non-zero, last date the expirable cookie was set/seen */
  
 diff --git a/include/types/proxy.h b/include/types/proxy.h
-index a06078a..a7c1a44 100644
+index 1773658..b05d2fa 100644
 --- a/include/types/proxy.h
 +++ b/include/types/proxy.h
 @@ -165,6 +165,9 @@
@@ -246,7 +265,7 @@ index 25fabf7..6fb2e5e 100644
   */
  void buffer_dump(FILE *o, struct buffer *b, int from, int to)
 diff --git a/src/cfgparse.c b/src/cfgparse.c
-index 90fdbff..d355518 100644
+index 643f065..bfb059f 100644
 --- a/src/cfgparse.c
 +++ b/src/cfgparse.c
 @@ -4576,6 +4576,78 @@ stats_error_parsing:
@@ -329,10 +348,10 @@ index 90fdbff..d355518 100644
  		struct cfg_kw_list *kwl;
  		int index;
 diff --git a/src/haproxy.c b/src/haproxy.c
-index ec481aa..ff06807 100644
+index 6141a5b..eb82c2c 100644
 --- a/src/haproxy.c
 +++ b/src/haproxy.c
-@@ -840,6 +840,9 @@ void deinit(void)
+@@ -832,6 +832,9 @@ void deinit(void)
  			free(rdr);
  		}
  
@@ -343,7 +362,7 @@ index ec481aa..ff06807 100644
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index 1ad838b..d89e6e3 100644
+index dc65cbd..d32de0d 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
 @@ -3123,6 +3123,49 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
@@ -407,7 +426,7 @@ index 1ad838b..d89e6e3 100644
  			if (rule->cookie_len) {
  				memcpy(rdr.str + rdr.len, "\r\nSet-Cookie: ", 14);
  				rdr.len += 14;
-@@ -7661,6 +7708,7 @@ void http_end_txn(struct session *s)
+@@ -7646,6 +7693,7 @@ void http_end_txn(struct session *s)
  	txn->uri = NULL;
  	txn->srv_cookie = NULL;
  	txn->cli_cookie = NULL;
@@ -415,7 +434,7 @@ index 1ad838b..d89e6e3 100644
  
  	if (txn->req.cap) {
  		struct cap_hdr *h;
-@@ -8200,9 +8248,8 @@ acl_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, char *sol,
+@@ -8185,9 +8233,8 @@ acl_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, char *sol,
  	return 0;
  }
  
@@ -427,7 +446,7 @@ index 1ad838b..d89e6e3 100644
  {
  	struct http_txn *txn = l7;
  
-@@ -8359,6 +8406,37 @@ acl_fetch_http_auth(struct proxy *px, struct session *s, void *l7, int dir,
+@@ -8344,6 +8391,37 @@ acl_fetch_http_auth(struct proxy *px, struct session *s, void *l7, int dir,
  	return 1;
  }
  
@@ -465,7 +484,7 @@ index 1ad838b..d89e6e3 100644
  /************************************************************************/
  /*             All supported keywords must be declared here.            */
  /************************************************************************/
-@@ -8439,6 +8517,9 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -8424,6 +8502,9 @@ static struct acl_kw_list acl_kws = {{ },{
  	{ "http_auth",       acl_parse_nothing, acl_fetch_http_auth, acl_match_auth, ACL_USE_L7REQ_PERMANENT },
  	{ "http_auth_group", acl_parse_strcat,  acl_fetch_http_auth, acl_match_auth, ACL_USE_L7REQ_PERMANENT },
  	{ "http_first_req",  acl_parse_nothing, acl_fetch_http_first_req, acl_match_nothing, ACL_USE_L7REQ_PERMANENT },
@@ -475,3 +494,6 @@ index 1ad838b..d89e6e3 100644
  	{ NULL, NULL, NULL, NULL },
  }};
  
+-- 
+1.8.0
+

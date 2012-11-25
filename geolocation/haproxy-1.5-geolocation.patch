@@ -1,3 +1,24 @@
+From 4f7db3aa75095b803ff403b9d0ce4a3b7d448c87 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
+Date: Sun, 25 Nov 2012 18:25:51 +0100
+Subject: [PATCH] Geolocation based on haproxy 1.5-dev13
+
+---
+ include/common/chunk.h     |  1 +
+ include/proto/acl.h        |  4 +++
+ include/proto/proto_http.h |  2 ++
+ include/proto/proto_tcp.h  |  1 +
+ include/types/acl.h        |  1 +
+ include/types/proto_http.h |  1 +
+ include/types/proxy.h      |  8 +++++
+ src/acl.c                  | 65 ++++++++++++++++++++++++++++++++---
+ src/cfgparse.c             | 70 ++++++++++++++++++++++++++++++++++++++
+ src/chunk.c                | 39 +++++++++++++++++++++
+ src/haproxy.c              |  3 ++
+ src/proto_http.c           | 84 +++++++++++++++++++++++++++++++++++++++++++---
+ src/proto_tcp.c            |  5 ++-
+ 13 files changed, 272 insertions(+), 12 deletions(-)
+
 diff --git a/include/common/chunk.h b/include/common/chunk.h
 index 191f9e7..a7dccf7 100644
 --- a/include/common/chunk.h
@@ -26,7 +47,7 @@ index 38ad604..8f5f3f5 100644
  
  /*
 diff --git a/include/proto/proto_http.h b/include/proto/proto_http.h
-index b65408a..bcfdeec 100644
+index 48a606f..083bfb2 100644
 --- a/include/proto/proto_http.h
 +++ b/include/proto/proto_http.h
 @@ -111,6 +111,8 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
@@ -228,10 +249,10 @@ index adc89f3..8c2779e 100644
  /*             All supported keywords must be declared here.            */
  /************************************************************************/
 diff --git a/src/cfgparse.c b/src/cfgparse.c
-index 4ee5f89..cc2942f 100644
+index c317743..a420483 100644
 --- a/src/cfgparse.c
 +++ b/src/cfgparse.c
-@@ -5495,6 +5495,76 @@ stats_error_parsing:
+@@ -5511,6 +5511,76 @@ stats_error_parsing:
  				goto out;
  		}
  	}
@@ -359,10 +380,10 @@ index d027569..e229569 100644
   * Local variables:
   *  c-indent-level: 8
 diff --git a/src/haproxy.c b/src/haproxy.c
-index 20fb56d..662ca6b 100644
+index b5f9f39..18d7203 100644
 --- a/src/haproxy.c
 +++ b/src/haproxy.c
-@@ -1038,6 +1038,9 @@ void deinit(void)
+@@ -1026,6 +1026,9 @@ void deinit(void)
  		deinit_stick_rules(&p->storersp_rules);
  		deinit_stick_rules(&p->sticking_rules);
  
@@ -373,7 +394,7 @@ index 20fb56d..662ca6b 100644
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index b2ae01c..1e9f831 100644
+index b82d453..989d4fb 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
 @@ -3134,6 +3134,47 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
@@ -435,7 +456,7 @@ index b2ae01c..1e9f831 100644
  			if (rule->cookie_len) {
  				memcpy(trash.str + trash.len, "\r\nSet-Cookie: ", 14);
  				trash.len += 14;
-@@ -7761,7 +7806,7 @@ void http_end_txn(struct session *s)
+@@ -7769,7 +7814,7 @@ void http_end_txn(struct session *s)
  	txn->uri = NULL;
  	txn->srv_cookie = NULL;
  	txn->cli_cookie = NULL;
@@ -444,7 +465,7 @@ index b2ae01c..1e9f831 100644
  	if (txn->req.cap) {
  		struct cap_hdr *h;
  		for (h = s->fe->req_cap; h; h = h->next)
-@@ -8320,9 +8365,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
+@@ -8328,9 +8373,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
   * and an optional one of type int to designate a specific occurrence.
   * It returns an IPv4 or IPv6 address.
   */
@@ -456,7 +477,7 @@ index b2ae01c..1e9f831 100644
  {
  	int ret;
  
-@@ -8422,6 +8466,35 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+@@ -8430,6 +8474,35 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
  	return 1;
  }
  
@@ -492,7 +513,7 @@ index b2ae01c..1e9f831 100644
  static int
  acl_fetch_proto_http(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
                       const struct arg *args, struct sample *smp)
-@@ -8955,6 +9028,8 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -8963,6 +9036,8 @@ static struct acl_kw_list acl_kws = {{ },{
  	{ "cook_sub",        acl_parse_str,     smp_fetch_cookie,         acl_match_sub,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
  	{ "cook_val",        acl_parse_int,     smp_fetch_cookie_val,     acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
  
@@ -501,7 +522,7 @@ index b2ae01c..1e9f831 100644
  	{ "hdr",             acl_parse_str,     smp_fetch_hdr,            acl_match_str,     ACL_USE_L7REQ_VOLATILE|ACL_MAY_LOOKUP, ARG2(0,STR,SINT), val_hdr },
  	{ "hdr_beg",         acl_parse_str,     smp_fetch_hdr,            acl_match_beg,     ACL_USE_L7REQ_VOLATILE, ARG2(0,STR,SINT), val_hdr },
  	{ "hdr_cnt",         acl_parse_int,     smp_fetch_hdr_cnt,        acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
-@@ -9043,6 +9118,7 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -9051,6 +9126,7 @@ static struct acl_kw_list acl_kws = {{ },{
  static struct sample_fetch_kw_list sample_fetch_keywords = {{ },{
  	{ "hdr",        smp_fetch_hdr,            ARG2(1,STR,SINT), val_hdr, SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
  	{ "base",       smp_fetch_base,           0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
@@ -525,3 +546,6 @@ index e744c76..2a73f92 100644
  {
  	switch (l4->si[0].conn->addr.from.ss_family) {
  	case AF_INET:
+-- 
+1.8.0
+
