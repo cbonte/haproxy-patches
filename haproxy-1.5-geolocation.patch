@@ -1,0 +1,527 @@
+diff --git a/include/common/chunk.h b/include/common/chunk.h
+index 191f9e7..a7dccf7 100644
+--- a/include/common/chunk.h
++++ b/include/common/chunk.h
+@@ -47,6 +47,7 @@ int chunk_htmlencode(struct chunk *dst, struct chunk *src);
+ int chunk_asciiencode(struct chunk *dst, struct chunk *src, char qc);
+ int chunk_strcmp(const struct chunk *chk, const char *str);
+ int chunk_strcasecmp(const struct chunk *chk, const char *str);
++int chunk_replace(struct chunk *chk, const char *token, const char *value);
+ 
+ static inline void chunk_reset(struct chunk *chk)
+ {
+diff --git a/include/proto/acl.h b/include/proto/acl.h
+index 38ad604..8f5f3f5 100644
+--- a/include/proto/acl.h
++++ b/include/proto/acl.h
+@@ -213,6 +213,10 @@ int acl_match_ip(struct sample *smp, struct acl_pattern *pattern);
+  */
+ int acl_match_reg(struct sample *smp, struct acl_pattern *pattern);
+ 
++void *acl_lookup_ip(struct sample *smp, struct acl_expr *expr);
++int init_geoloc_expr(char *filename, struct acl_expr **geoloc_expr, char **err);
++void deinit_geoloc_expr(struct acl_expr *expr);
++
+ #endif /* _PROTO_ACL_H */
+ 
+ /*
+diff --git a/include/proto/proto_http.h b/include/proto/proto_http.h
+index b65408a..bcfdeec 100644
+--- a/include/proto/proto_http.h
++++ b/include/proto/proto_http.h
+@@ -111,6 +111,8 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
+ void free_http_req_rules(struct list *r);
+ struct chunk *http_error_message(struct session *s, int msgnum);
+ 
++int smp_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, unsigned int opt, const struct arg *args, struct sample *smp);
++
+ /* to be used when contents change in an HTTP message */
+ #define http_msg_move_end(msg, bytes) do { \
+ 		unsigned int _bytes = (bytes);	\
+diff --git a/include/proto/proto_tcp.h b/include/proto/proto_tcp.h
+index a41e025..303540e 100644
+--- a/include/proto/proto_tcp.h
++++ b/include/proto/proto_tcp.h
+@@ -38,6 +38,7 @@ int tcp_inspect_request(struct session *s, struct channel *req, int an_bit);
+ int tcp_inspect_response(struct session *s, struct channel *rep, int an_bit);
+ int tcp_exec_req_rules(struct session *s);
+ int smp_fetch_rdp_cookie(struct proxy *px, struct session *l4, void *l7, unsigned int opt, const struct arg *args, struct sample *smp);
++int smp_fetch_src(struct proxy *px, struct session *l4, void *l7, unsigned int opt, const struct arg *args, struct sample *smp);
+ 
+ /* Converts the INET/INET6 source address to a stick_table key usable for table
+  * lookups. Returns either NULL if the source cannot be converted (eg: not
+diff --git a/include/types/acl.h b/include/types/acl.h
+index bf5537f..2fc9cb2 100644
+--- a/include/types/acl.h
++++ b/include/types/acl.h
+@@ -77,6 +77,7 @@ enum {
+ 	ACL_PAT_F_FROM_FILE   = 1 << 1,       /* pattern comes from a file */
+ 	ACL_PAT_F_TREE_OK     = 1 << 2,       /* the pattern parser is allowed to build a tree */
+ 	ACL_PAT_F_TREE        = 1 << 3,       /* some patterns are arranged in a tree */
++	ACL_PAT_F_DICTIONARY  = 1 << 4,       /* some patterns define a dictionary (geolocation) */
+ };
+ 
+ /* what capabilities an ACL uses. These flags are set during parsing, which
+diff --git a/include/types/proto_http.h b/include/types/proto_http.h
+index ef9e125..74ee637 100644
+--- a/include/types/proto_http.h
++++ b/include/types/proto_http.h
+@@ -364,6 +364,7 @@ struct http_txn {
+ 	char *cli_cookie;               /* cookie presented by the client, in capture mode */
+ 	char *srv_cookie;               /* cookie presented by the server, in capture mode */
+ 	char *sessid;                   /* the appsession id, if found in the request or in the response */
++	char *geoloc;                   /* geolocation detected for this transaction */
+ 	int cookie_first_date;          /* if non-zero, first date the expirable cookie was set/seen */
+ 	int cookie_last_date;           /* if non-zero, last date the expirable cookie was set/seen */
+ 
+diff --git a/include/types/proxy.h b/include/types/proxy.h
+index 5d99423..d8bf269 100644
+--- a/include/types/proxy.h
++++ b/include/types/proxy.h
+@@ -178,6 +178,9 @@ enum {
+ #define STK_IS_STORE	0x00000002	/* store on request fetch */
+ #define STK_ON_RSP	0x00000004	/* store on response fetch */
+ 
++#define GEOLOC_SRC	0x00000001      /* geolocation based on the client source IP */
++#define GEOLOC_HDR	0x00000002      /* geolocation based on a HTTP header */
++
+ struct error_snapshot {
+ 	struct timeval when;		/* date of this event, (tv_sec == 0) means "never" */
+ 	unsigned int len;		/* original length of the last invalid request/response */
+@@ -347,6 +350,11 @@ struct proxy {
+ 	int bind_hdr_len;			/* length of the name of the header above */
+ 	int bind_hdr_occ;			/* occurrence number of header above: >0 = from first, <0 = from end, 0=disabled */
+ #endif
++	int geoloc_options;			/* GEOLOC_SRC, GEOLOC_HDR */
++	char *geoloc_hdr_name;			/* header name used for geolocation if defined */
++	int geoloc_hdr_len;			/* length of the name of the header above */
++	int geoloc_hdr_occ;			/* occurrence number of header above: >0 = from first, <0 = from end, 0=disabled */
++	struct acl_expr *geoloc_expr;		/* special acl expression reserved for the geolocation */
+ 	struct error_snapshot invalid_req, invalid_rep; /* captures of last errors */
+ 
+ 	/* used only during configuration parsing */
+diff --git a/src/acl.c b/src/acl.c
+index adc89f3..8c2779e 100644
+--- a/src/acl.c
++++ b/src/acl.c
+@@ -506,7 +506,7 @@ int acl_match_bin(struct sample *smp, struct acl_pattern *pattern)
+ /* Lookup a string in the expression's pattern tree. The node is returned if it
+  * exists, otherwise NULL.
+  */
+-static void *acl_lookup_str(struct sample *smp, struct acl_expr *expr)
++void *acl_lookup_str(struct sample *smp, struct acl_expr *expr)
+ {
+ 	/* data are stored in a tree */
+ 	struct ebmb_node *node;
+@@ -788,7 +788,7 @@ int acl_match_ip(struct sample *smp, struct acl_pattern *pattern)
+ /* Lookup an IPv4 address in the expression's pattern tree using the longest
+  * match method. The node is returned if it exists, otherwise NULL.
+  */
+-static void *acl_lookup_ip(struct sample *smp, struct acl_expr *expr)
++void *acl_lookup_ip(struct sample *smp, struct acl_expr *expr)
+ {
+ 	struct in_addr *s;
+ 
+@@ -1137,15 +1137,20 @@ int acl_parse_ip(const char **text, struct acl_pattern *pattern, int *opaque, ch
+ 		 * once again is null.
+ 		 */
+ 		pattern->type = SMP_T_IPV4;
++		
+ 		if (mask + (mask & -mask) == 0 && tree) {
++			int len = (pattern->ptr.str ? strlen(pattern->ptr.str) + 1 : 0); /* optional null terminated string length */
+ 			mask = mask ? 33 - flsnz(mask & -mask) : 0; /* equals cidr value */
+ 			/* FIXME: insert <addr>/<mask> into the tree here */
+-			node = calloc(1, sizeof(*node) + 4); /* reserve 4 bytes for IPv4 address */
++			node = calloc(1, sizeof(*node) + 4 + len); /* reserve 4 bytes for IPv4 address + optional tring length */
+ 			if (!node) {
+ 				memprintf(err, "out of memory while loading IPv4 pattern");
+ 				return 0;
+ 			}
+ 			memcpy(node->key, &pattern->val.ipv4.addr, 4); /* network byte order */
++			if (len)
++				memcpy(node->key + 4, pattern->ptr.str, len);
++
+ 			node->node.pfx = mask;
+ 			if (ebmb_insert_prefix(tree, node, 4) != node)
+ 				free(node); /* was a duplicate */
+@@ -1309,6 +1314,8 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
+ 	pattern = NULL;
+ 	args[1] = "";
+ 	while (fgets(trash.str, trash.size, file) != NULL) {
++		char *value = NULL;
++
+ 		line++;
+ 		c = trash.str;
+ 
+@@ -1320,8 +1327,15 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
+ 		while (*c == ' ' || *c == '\t')
+ 			c++;
+ 
+-
+ 		args[0] = c;
++		if (patflags & ACL_PAT_F_DICTIONARY) {
++			while (*c && *c != '\n' && *c != '\r' && *c != '\t' && *c != ' ')
++				c++;
++			while (*c == ' ' || *c == '\t')
++				*c++ = 0;			
++			value = c;
++		}
++		
+ 		while (*c && *c != '\n' && *c != '\r')
+ 			c++;
+ 		*c = 0;
+@@ -1340,7 +1354,9 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
+ 
+ 		memset(pattern, 0, sizeof(*pattern));
+ 		pattern->flags = patflags;
+-
++		if (value) {
++			pattern->ptr.str = strdup(value);
++		}
+ 		if ((aclkw->requires & ACL_MAY_LOOKUP) && !(pattern->flags & ACL_PAT_F_IGNORE_CASE)) {
+ 			/* we pre-set the data pointer to the tree's head so that functions
+ 			 * which are able to insert in a tree know where to do that.
+@@ -2282,6 +2298,45 @@ acl_find_targets(struct proxy *p)
+ 	return cfgerr;
+ }
+ 
++
++/*
++ * Initialize a specific acl expression used for geolocation.
++ */
++int init_geoloc_expr(char *filename, struct acl_expr **geoloc_expr, char **err) {
++	struct acl_keyword *aclkw;
++	struct acl_expr *expr;
++
++	aclkw = find_acl_kw("src");
++	if (!aclkw) {
++		memprintf(err, "unable to find internal acl keyword while loading geoloc dictionary");
++		return 0;
++	}
++
++	expr = (struct acl_expr *)calloc(1, sizeof(*expr));
++	if (!expr) {
++		memprintf(err, "out of memory while loading geoloc dictionary");
++		return 0;
++	}
++
++	expr->kw = aclkw;
++	aclkw->use_cnt++;
++	LIST_INIT(&expr->patterns);
++	expr->pattern_tree = EB_ROOT_UNIQUE;
++	expr->args = empty_arg_list;
++
++	*geoloc_expr = expr;
++
++	return acl_read_patterns_from_file(expr->kw, expr, filename, ACL_PAT_F_FROM_FILE | ACL_PAT_F_DICTIONARY, err);
++}
++
++/*
++ * Purge the gelocation expression and free memory.
++ */
++void deinit_geoloc_expr(struct acl_expr *expr) {
++	prune_acl_expr(expr);
++	free(expr);
++}
++
+ /************************************************************************/
+ /*             All supported keywords must be declared here.            */
+ /************************************************************************/
+diff --git a/src/cfgparse.c b/src/cfgparse.c
+index 4ee5f89..cc2942f 100644
+--- a/src/cfgparse.c
++++ b/src/cfgparse.c
+@@ -5495,6 +5495,76 @@ stats_error_parsing:
+ 				goto out;
+ 		}
+ 	}
++	else if (!strcmp(args[0], "geolocate")) {
++		int cur_arg;
++
++		if (warnifnotcap(curproxy, PR_CAP_FE | PR_CAP_BE, file, linenum, args[0], NULL))
++			err_code |= ERR_WARN;
++
++		cur_arg = 1;
++		if (strcmp(args[cur_arg], "src") == 0) {
++			curproxy->geoloc_options = GEOLOC_SRC;
++		} else if (strncmp(args[cur_arg], "hdr_ip(", 7) == 0) {
++			char *name, *end;
++
++			name = args[cur_arg] + 7;
++			while (isspace(*name))
++				name++;
++
++			end = name;
++			while (*end && !isspace(*end) && *end != ',' && *end != ')')
++				end++;
++
++			curproxy->geoloc_options = GEOLOC_HDR;
++			curproxy->geoloc_hdr_name = calloc(1, end - name + 1);
++			curproxy->geoloc_hdr_len = end - name;
++			memcpy(curproxy->geoloc_hdr_name, name, end - name);
++			curproxy->geoloc_hdr_name[end-name] = '\0';
++			curproxy->geoloc_hdr_occ = -1;
++
++			/* now look for an occurrence number */
++			while (isspace(*end))
++				end++;
++			if (*end == ',') {
++				end++;
++				name = end;
++				if (*end == '-')
++					end++;
++				while (isdigit(*end))
++					end++;
++				curproxy->geoloc_hdr_occ = strl2ic(name, end-name);
++			}
++
++			if (curproxy->geoloc_hdr_occ < -MAX_HDR_HISTORY) {
++				Alert("parsing [%s:%d] : hdr_ip(name,num) does not support negative"
++					" occurrences values smaller than %d.\n",
++					file, linenum, MAX_HDR_HISTORY);
++				err_code |= ERR_ALERT | ERR_FATAL;
++				goto out;
++			}
++		}
++		else if (!*args[cur_arg]) {
++			Alert("parsing [%s:%d] : '%s' expects 'src' or 'hdr_ip(<hdr>,<occ>)' as argument.\n",
++				file, linenum, args[0]);
++			err_code |= ERR_ALERT | ERR_FATAL;
++			goto out;
++		}
++		cur_arg++;
++		if (*args[cur_arg]) {
++			if (!init_geoloc_expr(args[cur_arg], &curproxy->geoloc_expr, &errmsg)) {
++				Alert("parsing [%s:%d] : %s: error detected while processing geolocation rule : %s\n",
++					file, linenum, args[0], errmsg);
++				err_code |= ERR_ALERT | ERR_FATAL;
++				goto out;
++			}
++		}
++		else {
++			Alert("parsing [%s:%d] : '%s' expects <filename> as argument.\n",
++				file, linenum, args[0]);
++			err_code |= ERR_ALERT | ERR_FATAL;
++			goto out;
++		}
++	}
+ 	else {
+ 		struct cfg_kw_list *kwl;
+ 		int index;
+diff --git a/src/chunk.c b/src/chunk.c
+index d027569..e229569 100644
+--- a/src/chunk.c
++++ b/src/chunk.c
+@@ -199,6 +199,45 @@ int chunk_strcasecmp(const struct chunk *chk, const char *str)
+ 	return diff;
+ }
+ 
++
++/*
++ * Replace a token in chunk with a specified value, respecting the limit of at most
++ * chk->size chars. Returns the new chunk size.
++ */
++int chunk_replace(struct chunk *chk, const char *token, const char *value)
++{
++	int i;
++	int token_len, value_len;
++	int delta;
++	char *s = chk->str;
++	int len = chk->len;
++
++	token_len = strlen(token);
++	value_len = strlen(value);
++	delta = value_len - token_len;
++	for (i = 0; i < len;) {
++		if (len + delta > chk->size) {
++			return -1;
++		}
++		if (memcmp(s, token, token_len) == 0) {
++			if (token_len != value_len) {
++				memmove(s + value_len, s + token_len, len - i - token_len);
++			}
++			memcpy(s, value, value_len);
++			len += delta;
++			/* skip the value inserted to prevent recursion */
++			i += value_len;
++			s += value_len;
++		} else {
++			i++;
++			s++;
++		}
++	}
++	chk->len = len;
++	return chk->len;
++}
++
++
+ /*
+  * Local variables:
+  *  c-indent-level: 8
+diff --git a/src/haproxy.c b/src/haproxy.c
+index 20fb56d..662ca6b 100644
+--- a/src/haproxy.c
++++ b/src/haproxy.c
+@@ -1038,6 +1038,9 @@ void deinit(void)
+ 		deinit_stick_rules(&p->storersp_rules);
+ 		deinit_stick_rules(&p->sticking_rules);
+ 
++		if (p->geoloc_expr)
++			deinit_geoloc_expr(p->geoloc_expr);
++
+ 		free(p->appsession_name);
+ 
+ 		h = p->req_cap;
+diff --git a/src/proto_http.c b/src/proto_http.c
+index b2ae01c..1e9f831 100644
+--- a/src/proto_http.c
++++ b/src/proto_http.c
+@@ -3134,6 +3134,47 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+ 		goto return_prx_cond;
+ 	}
+ 
++	if (px->geoloc_expr) {
++		struct sample smp;
++		smp.type = SMP_TYPES; /* default value used to detect non matches */
++		if (px->geoloc_options & GEOLOC_SRC) {
++			struct arg args[0];
++			smp_fetch_src(px, s, txn, SMP_OPT_DIR_REQ, args, &smp);
++		}
++		else if (px->geoloc_options & GEOLOC_HDR) {
++			struct arg args[2];
++			args[0].type = ARGT_STR;
++			args[0].data.str.str = px->geoloc_hdr_name;
++			args[0].data.str.len = px->geoloc_hdr_len;
++
++			args[1].type = ARGT_SINT;
++			args[1].data.uint = px->geoloc_hdr_occ;
++
++			smp_fetch_hdr_ip(px, s, txn, SMP_OPT_DIR_REQ, args, &smp);
++		}
++		
++		if (smp.type == SMP_T_IPV4 || smp.type == SMP_T_IPV6) {
++			struct ebmb_node *node = NULL;
++			if (!eb_is_empty(&px->geoloc_expr->pattern_tree)) {
++				/* a tree is present, let's check what type it is */
++				node = acl_lookup_ip(&smp, px->geoloc_expr);
++			}
++			if (node) {
++				txn->geoloc = (char *) (node->key + 4);
++			}
++			else {
++				struct acl_pattern *pattern;
++				/* call the match() function for all tests on this value */
++				list_for_each_entry(pattern, &px->geoloc_expr->patterns, list) {
++					if (px->geoloc_expr->kw->match(&smp, pattern)) {
++						txn->geoloc = pattern->ptr.str;
++						break;
++					}
++				}
++			}
++		}
++	}
++
+ 	/* add request headers from the rule sets in the same order */
+ 	list_for_each_entry(wl, &px->req_add, list) {
+ 		if (wl->cond) {
+@@ -3377,6 +3418,10 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+ 				break;
+ 			}
+ 
++			if (px->geoloc_expr && chunk_replace(&trash, "${geoloc}", txn->geoloc ? txn->geoloc : "") < 0) {
++				goto return_bad_req;
++			}
++
+ 			if (rule->cookie_len) {
+ 				memcpy(trash.str + trash.len, "\r\nSet-Cookie: ", 14);
+ 				trash.len += 14;
+@@ -7761,7 +7806,7 @@ void http_end_txn(struct session *s)
+ 	txn->uri = NULL;
+ 	txn->srv_cookie = NULL;
+ 	txn->cli_cookie = NULL;
+-
++	txn->geoloc = NULL;
+ 	if (txn->req.cap) {
+ 		struct cap_hdr *h;
+ 		for (h = s->fe->req_cap; h; h = h->next)
+@@ -8320,9 +8365,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
+  * and an optional one of type int to designate a specific occurrence.
+  * It returns an IPv4 or IPv6 address.
+  */
+-static int
+-smp_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+-                 const struct arg *args, struct sample *smp)
++int smp_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
++		     const struct arg *args, struct sample *smp)
+ {
+ 	int ret;
+ 
+@@ -8422,6 +8466,35 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+ 	return 1;
+ }
+ 
++
++static int
++smp_fetch_geoloc(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
++               const struct arg *args, struct sample *smp)
++{
++	struct http_txn *txn = l7;
++
++	CHECK_HTTP_MESSAGE_FIRST();
++
++	if (!txn->geoloc)
++		return 0;
++	
++	strcpy(trash.str, txn->geoloc);
++	smp->type = SMP_T_STR;
++	smp->data.str.str = trash.str;
++	smp->data.str.len = strlen(trash.str);
++
++	smp->flags = 0;
++	return 1;
++}
++
++static int
++acl_match_geoloc(struct sample *smp, struct acl_pattern *pattern) {
++	if (strcmp(pattern->ptr.str, "*") == 0) {
++		return ACL_PAT_PASS;
++	}
++	return acl_match_str(smp, pattern);
++}
++
+ static int
+ acl_fetch_proto_http(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                      const struct arg *args, struct sample *smp)
+@@ -8955,6 +9028,8 @@ static struct acl_kw_list acl_kws = {{ },{
+ 	{ "cook_sub",        acl_parse_str,     smp_fetch_cookie,         acl_match_sub,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
+ 	{ "cook_val",        acl_parse_int,     smp_fetch_cookie_val,     acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
+ 
++	{ "geoloc",          acl_parse_str,     smp_fetch_geoloc,         acl_match_geoloc,  ACL_USE_L7REQ_VOLATILE|ACL_MAY_LOOKUP, 0 },
++
+ 	{ "hdr",             acl_parse_str,     smp_fetch_hdr,            acl_match_str,     ACL_USE_L7REQ_VOLATILE|ACL_MAY_LOOKUP, ARG2(0,STR,SINT), val_hdr },
+ 	{ "hdr_beg",         acl_parse_str,     smp_fetch_hdr,            acl_match_beg,     ACL_USE_L7REQ_VOLATILE, ARG2(0,STR,SINT), val_hdr },
+ 	{ "hdr_cnt",         acl_parse_int,     smp_fetch_hdr_cnt,        acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
+@@ -9043,6 +9118,7 @@ static struct acl_kw_list acl_kws = {{ },{
+ static struct sample_fetch_kw_list sample_fetch_keywords = {{ },{
+ 	{ "hdr",        smp_fetch_hdr,            ARG2(1,STR,SINT), val_hdr, SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
+ 	{ "base",       smp_fetch_base,           0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
++	{ "geoloc",     smp_fetch_geoloc,         0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
+ 	{ "path",       smp_fetch_path,           0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
+ 	{ "url",        smp_fetch_url,            0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
+ 	{ "url_ip",     smp_fetch_url_ip,         0,                NULL,    SMP_T_IPV4, SMP_CAP_L7|SMP_CAP_REQ },
+diff --git a/src/proto_tcp.c b/src/proto_tcp.c
+index e744c76..2a73f92 100644
+--- a/src/proto_tcp.c
++++ b/src/proto_tcp.c
+@@ -1507,9 +1507,8 @@ acl_fetch_rdp_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigne
+ 
+ 
+ /* fetch the connection's source IPv4/IPv6 address */
+-static int
+-smp_fetch_src(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+-              const struct arg *args, struct sample *smp)
++int smp_fetch_src(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
++		  const struct arg *args, struct sample *smp)
+ {
+ 	switch (l4->si[0].conn->addr.from.ss_family) {
+ 	case AF_INET:
