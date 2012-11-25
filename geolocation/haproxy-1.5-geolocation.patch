@@ -1,6 +1,6 @@
-From 4f7db3aa75095b803ff403b9d0ce4a3b7d448c87 Mon Sep 17 00:00:00 2001
+From 3da3a714f2493123373c017248d568a0fe405648 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Sun, 25 Nov 2012 18:25:51 +0100
+Date: Sun, 25 Nov 2012 23:36:30 +0100
 Subject: [PATCH] Geolocation based on haproxy 1.5-dev13
 
 ---
@@ -13,11 +13,11 @@ Subject: [PATCH] Geolocation based on haproxy 1.5-dev13
  include/types/proxy.h      |  8 +++++
  src/acl.c                  | 65 ++++++++++++++++++++++++++++++++---
  src/cfgparse.c             | 70 ++++++++++++++++++++++++++++++++++++++
- src/chunk.c                | 39 +++++++++++++++++++++
+ src/chunk.c                | 48 ++++++++++++++++++++++++++
  src/haproxy.c              |  3 ++
  src/proto_http.c           | 84 +++++++++++++++++++++++++++++++++++++++++++---
  src/proto_tcp.c            |  5 ++-
- 13 files changed, 272 insertions(+), 12 deletions(-)
+ 13 files changed, 281 insertions(+), 12 deletions(-)
 
 diff --git a/include/common/chunk.h b/include/common/chunk.h
 index 191f9e7..a7dccf7 100644
@@ -330,10 +330,10 @@ index c317743..a420483 100644
  		struct cfg_kw_list *kwl;
  		int index;
 diff --git a/src/chunk.c b/src/chunk.c
-index d027569..e229569 100644
+index d027569..c2e6e24 100644
 --- a/src/chunk.c
 +++ b/src/chunk.c
-@@ -199,6 +199,45 @@ int chunk_strcasecmp(const struct chunk *chk, const char *str)
+@@ -199,6 +199,54 @@ int chunk_strcasecmp(const struct chunk *chk, const char *str)
  	return diff;
  }
  
@@ -345,34 +345,43 @@ index d027569..e229569 100644
 +int chunk_replace(struct chunk *chk, const char *token, const char *value)
 +{
 +	int i;
-+	int token_len, value_len;
-+	int delta;
++	int token_len, value_len, delta;
 +	char *s = chk->str;
 +	int len = chk->len;
 +
 +	token_len = strlen(token);
++	if (!token_len)
++		goto out;
++
 +	value_len = strlen(value);
 +	delta = value_len - token_len;
-+	for (i = 0; i < len;) {
-+		if (len + delta > chk->size) {
-+			return -1;
-+		}
-+		if (memcmp(s, token, token_len) == 0) {
-+			if (token_len != value_len) {
-+				memmove(s + value_len, s + token_len, len - i - token_len);
++	int n = len - token_len;
++
++	i = 0;
++	while (i <= n) {
++		if ((*s == token[0]) && (memcmp(s, token, token_len) == 0)) {
++			if (delta) {
++				if (len + delta > chk->size)
++					return -1;
++				if (n - i) 
++					memmove(s + value_len, s + token_len, n - i);
++				len += delta;
++				n += delta;
 +			}
-+			memcpy(s, value, value_len);
-+			len += delta;
-+			/* skip the value inserted to prevent recursion */
-+			i += value_len;
-+			s += value_len;
++			if (value_len) {
++				memcpy(s, value, value_len);
++				/* skip the value inserted to prevent recursion */
++				i += value_len;
++				s += value_len;
++			}
 +		} else {
 +			i++;
 +			s++;
 +		}
 +	}
 +	chk->len = len;
-+	return chk->len;
++ out:
++	return len;
 +}
 +
 +
