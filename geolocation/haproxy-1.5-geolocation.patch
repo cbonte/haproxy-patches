@@ -1,7 +1,7 @@
-From 3da3a714f2493123373c017248d568a0fe405648 Mon Sep 17 00:00:00 2001
+From f4de8512a0e29d3a8389a8d0b94fe3f5ace476d0 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Sun, 25 Nov 2012 23:36:30 +0100
-Subject: [PATCH] Geolocation based on haproxy 1.5-dev13
+Date: Mon, 26 Nov 2012 22:57:18 +0100
+Subject: [PATCH] Geolocation based on haproxy 1.5-dev14
 
 ---
  include/common/chunk.h     |  1 +
@@ -11,23 +11,23 @@ Subject: [PATCH] Geolocation based on haproxy 1.5-dev13
  include/types/acl.h        |  1 +
  include/types/proto_http.h |  1 +
  include/types/proxy.h      |  8 +++++
- src/acl.c                  | 65 ++++++++++++++++++++++++++++++++---
- src/cfgparse.c             | 70 ++++++++++++++++++++++++++++++++++++++
- src/chunk.c                | 48 ++++++++++++++++++++++++++
+ src/acl.c                  | 65 ++++++++++++++++++++++++++++++---
+ src/cfgparse.c             | 70 ++++++++++++++++++++++++++++++++++++
+ src/chunk.c                | 50 ++++++++++++++++++++++++++
  src/haproxy.c              |  3 ++
- src/proto_http.c           | 84 +++++++++++++++++++++++++++++++++++++++++++---
+ src/proto_http.c           | 89 +++++++++++++++++++++++++++++++++++++++++++---
  src/proto_tcp.c            |  5 ++-
- 13 files changed, 281 insertions(+), 12 deletions(-)
+ 13 files changed, 287 insertions(+), 13 deletions(-)
 
 diff --git a/include/common/chunk.h b/include/common/chunk.h
-index 191f9e7..a7dccf7 100644
+index 191f9e7..d35746e 100644
 --- a/include/common/chunk.h
 +++ b/include/common/chunk.h
 @@ -47,6 +47,7 @@ int chunk_htmlencode(struct chunk *dst, struct chunk *src);
  int chunk_asciiencode(struct chunk *dst, struct chunk *src, char qc);
  int chunk_strcmp(const struct chunk *chk, const char *str);
  int chunk_strcasecmp(const struct chunk *chk, const char *str);
-+int chunk_replace(struct chunk *chk, const char *token, const char *value);
++int chunk_replace(struct chunk *chk, const char *token, const char *value, const int ofs);
  
  static inline void chunk_reset(struct chunk *chk)
  {
@@ -60,7 +60,7 @@ index 48a606f..083bfb2 100644
  #define http_msg_move_end(msg, bytes) do { \
  		unsigned int _bytes = (bytes);	\
 diff --git a/include/proto/proto_tcp.h b/include/proto/proto_tcp.h
-index a41e025..303540e 100644
+index d55f4c5..44646f2 100644
 --- a/include/proto/proto_tcp.h
 +++ b/include/proto/proto_tcp.h
 @@ -38,6 +38,7 @@ int tcp_inspect_request(struct session *s, struct channel *req, int an_bit);
@@ -122,7 +122,7 @@ index 5d99423..d8bf269 100644
  
  	/* used only during configuration parsing */
 diff --git a/src/acl.c b/src/acl.c
-index adc89f3..8c2779e 100644
+index cba89ab..6c7b22b 100644
 --- a/src/acl.c
 +++ b/src/acl.c
 @@ -506,7 +506,7 @@ int acl_match_bin(struct sample *smp, struct acl_pattern *pattern)
@@ -165,7 +165,7 @@ index adc89f3..8c2779e 100644
  			node->node.pfx = mask;
  			if (ebmb_insert_prefix(tree, node, 4) != node)
  				free(node); /* was a duplicate */
-@@ -1309,6 +1314,8 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
+@@ -1308,6 +1313,8 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
  	pattern = NULL;
  	args[1] = "";
  	while (fgets(trash.str, trash.size, file) != NULL) {
@@ -174,7 +174,7 @@ index adc89f3..8c2779e 100644
  		line++;
  		c = trash.str;
  
-@@ -1320,8 +1327,15 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
+@@ -1319,8 +1326,15 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
  		while (*c == ' ' || *c == '\t')
  			c++;
  
@@ -191,7 +191,7 @@ index adc89f3..8c2779e 100644
  		while (*c && *c != '\n' && *c != '\r')
  			c++;
  		*c = 0;
-@@ -1340,7 +1354,9 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
+@@ -1339,7 +1353,9 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
  
  		memset(pattern, 0, sizeof(*pattern));
  		pattern->flags = patflags;
@@ -249,7 +249,7 @@ index adc89f3..8c2779e 100644
  /*             All supported keywords must be declared here.            */
  /************************************************************************/
 diff --git a/src/cfgparse.c b/src/cfgparse.c
-index c317743..a420483 100644
+index 9fa1881..f3f062b 100644
 --- a/src/cfgparse.c
 +++ b/src/cfgparse.c
 @@ -5511,6 +5511,76 @@ stats_error_parsing:
@@ -330,23 +330,24 @@ index c317743..a420483 100644
  		struct cfg_kw_list *kwl;
  		int index;
 diff --git a/src/chunk.c b/src/chunk.c
-index d027569..c2e6e24 100644
+index d027569..7182abb 100644
 --- a/src/chunk.c
 +++ b/src/chunk.c
-@@ -199,6 +199,54 @@ int chunk_strcasecmp(const struct chunk *chk, const char *str)
+@@ -199,6 +199,56 @@ int chunk_strcasecmp(const struct chunk *chk, const char *str)
  	return diff;
  }
  
 +
 +/*
-+ * Replace a token in chunk with a specified value, respecting the limit of at most
-+ * chk->size chars. Returns the new chunk size.
++ * Replace a token in chunk with a specified value, beginning at the <ofs>
++ * offset in the chunk, respecting the limit of at most chk->size chars.
++ * Returns the new chunk size.
 + */
-+int chunk_replace(struct chunk *chk, const char *token, const char *value)
++int chunk_replace(struct chunk *chk, const char *token, const char *value, const int ofs)
 +{
 +	int i;
 +	int token_len, value_len, delta;
-+	char *s = chk->str;
++	char *s;
 +	int len = chk->len;
 +
 +	token_len = strlen(token);
@@ -357,7 +358,8 @@ index d027569..c2e6e24 100644
 +	delta = value_len - token_len;
 +	int n = len - token_len;
 +
-+	i = 0;
++	i = ofs;
++	s = chk->str + i;
 +	while (i <= n) {
 +		if ((*s == token[0]) && (memcmp(s, token, token_len) == 0)) {
 +			if (delta) {
@@ -403,7 +405,7 @@ index b5f9f39..18d7203 100644
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index b82d453..989d4fb 100644
+index 19ddbec..b5ce349 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
 @@ -3134,6 +3134,47 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
@@ -454,18 +456,37 @@ index b82d453..989d4fb 100644
  	/* add request headers from the rule sets in the same order */
  	list_for_each_entry(wl, &px->req_add, list) {
  		if (wl->cond) {
-@@ -3377,6 +3418,10 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3232,7 +3273,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+ 
+ 		if (ret) {
+ 			const char *msg_fmt;
+-
++			int location_ofs;
++			
+ 			/* build redirect message */
+ 			switch(rule->code) {
+ 			case 303:
+@@ -3250,6 +3292,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+ 			if (unlikely(!chunk_strcpy(&trash, msg_fmt)))
+ 				goto return_bad_req;
+ 
++			location_ofs = trash.len;
++
+ 			switch(rule->type) {
+ 			case REDIRECT_TYPE_SCHEME: {
+ 				const char *path;
+@@ -3377,6 +3421,10 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  				break;
  			}
  
-+			if (px->geoloc_expr && chunk_replace(&trash, "${geoloc}", txn->geoloc ? txn->geoloc : "") < 0) {
++			if (px->geoloc_expr && chunk_replace(&trash, "${geoloc}", txn->geoloc ? txn->geoloc : "", location_ofs) < 0) {
 +				goto return_bad_req;
 +			}
 +
  			if (rule->cookie_len) {
  				memcpy(trash.str + trash.len, "\r\nSet-Cookie: ", 14);
  				trash.len += 14;
-@@ -7769,7 +7814,7 @@ void http_end_txn(struct session *s)
+@@ -7780,7 +7828,7 @@ void http_end_txn(struct session *s)
  	txn->uri = NULL;
  	txn->srv_cookie = NULL;
  	txn->cli_cookie = NULL;
@@ -474,7 +495,7 @@ index b82d453..989d4fb 100644
  	if (txn->req.cap) {
  		struct cap_hdr *h;
  		for (h = s->fe->req_cap; h; h = h->next)
-@@ -8328,9 +8373,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
+@@ -8339,9 +8387,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
   * and an optional one of type int to designate a specific occurrence.
   * It returns an IPv4 or IPv6 address.
   */
@@ -486,7 +507,7 @@ index b82d453..989d4fb 100644
  {
  	int ret;
  
-@@ -8430,6 +8474,35 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+@@ -8441,6 +8488,35 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
  	return 1;
  }
  
@@ -522,7 +543,7 @@ index b82d453..989d4fb 100644
  static int
  acl_fetch_proto_http(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
                       const struct arg *args, struct sample *smp)
-@@ -8963,6 +9036,8 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -8974,6 +9050,8 @@ static struct acl_kw_list acl_kws = {{ },{
  	{ "cook_sub",        acl_parse_str,     smp_fetch_cookie,         acl_match_sub,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
  	{ "cook_val",        acl_parse_int,     smp_fetch_cookie_val,     acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
  
@@ -531,7 +552,7 @@ index b82d453..989d4fb 100644
  	{ "hdr",             acl_parse_str,     smp_fetch_hdr,            acl_match_str,     ACL_USE_L7REQ_VOLATILE|ACL_MAY_LOOKUP, ARG2(0,STR,SINT), val_hdr },
  	{ "hdr_beg",         acl_parse_str,     smp_fetch_hdr,            acl_match_beg,     ACL_USE_L7REQ_VOLATILE, ARG2(0,STR,SINT), val_hdr },
  	{ "hdr_cnt",         acl_parse_int,     smp_fetch_hdr_cnt,        acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
-@@ -9051,6 +9126,7 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -9062,6 +9140,7 @@ static struct acl_kw_list acl_kws = {{ },{
  static struct sample_fetch_kw_list sample_fetch_keywords = {{ },{
  	{ "hdr",        smp_fetch_hdr,            ARG2(1,STR,SINT), val_hdr, SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
  	{ "base",       smp_fetch_base,           0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
@@ -540,10 +561,10 @@ index b82d453..989d4fb 100644
  	{ "url",        smp_fetch_url,            0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
  	{ "url_ip",     smp_fetch_url_ip,         0,                NULL,    SMP_T_IPV4, SMP_CAP_L7|SMP_CAP_REQ },
 diff --git a/src/proto_tcp.c b/src/proto_tcp.c
-index e744c76..2a73f92 100644
+index 5516036..bcd63d9 100644
 --- a/src/proto_tcp.c
 +++ b/src/proto_tcp.c
-@@ -1507,9 +1507,8 @@ acl_fetch_rdp_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigne
+@@ -1521,9 +1521,8 @@ acl_fetch_rdp_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigne
  
  
  /* fetch the connection's source IPv4/IPv6 address */
