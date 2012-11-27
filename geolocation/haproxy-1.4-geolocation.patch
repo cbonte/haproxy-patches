@@ -1,6 +1,6 @@
-From 36a823d82195c9d2362308f3bbefe9b80d7d3bf5 Mon Sep 17 00:00:00 2001
+From 49b8e4131090b97c6193806f93da2b315b5f4e02 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Tue, 27 Nov 2012 16:01:11 +0100
+Date: Tue, 27 Nov 2012 16:38:36 +0100
 Subject: [PATCH] Geolocation based on haproxy 1.4.22
 
 ---
@@ -373,7 +373,7 @@ index 6141a5b..eb82c2c 100644
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index dc65cbd..ff1ee07 100644
+index dc65cbd..ec13cc6 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
 @@ -3071,6 +3071,70 @@ int http_process_req_stat_post(struct session *s, struct buffer *req)
@@ -395,7 +395,6 @@ index dc65cbd..ff1ee07 100644
 +	px = s->be;
 +	while (1) {
 +		if (px->geoloc_expr) {
-+			do_geoloc = 1;
 +			struct in_addr ip;
 +
 +			ip.s_addr = 0;
@@ -435,6 +434,7 @@ index dc65cbd..ff1ee07 100644
 +					}
 +				}
 +			}
++			do_geoloc = 1;
 +		}
 +		if (txn->geoloc || (px == s->fe)) {
 +			break;

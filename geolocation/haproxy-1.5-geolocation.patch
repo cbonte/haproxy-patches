@@ -1,6 +1,6 @@
-From d46613faaa4db5c7e91ddaff28b1e087d6dc81e7 Mon Sep 17 00:00:00 2001
+From 4df7acc4090974f71163aa80be141a0564083f2a Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Tue, 27 Nov 2012 16:23:50 +0100
+Date: Tue, 27 Nov 2012 16:36:29 +0100
 Subject: [PATCH] Geolocation based on haproxy 1.5-dev14
 
 ---
@@ -405,7 +405,7 @@ index b5f9f39..18d7203 100644
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index 19ddbec..d2a9ae3 100644
+index 19ddbec..c59c286 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
 @@ -2947,6 +2947,69 @@ http_check_access_rule(struct proxy *px, struct list *rules, struct session *s,
@@ -427,7 +427,6 @@ index 19ddbec..d2a9ae3 100644
 +	px = s->be;
 +	while (1) {
 +		if (px->geoloc_expr) {
-+			do_geoloc = 1;
 +			struct sample smp;
 +			smp.type = SMP_TYPES; /* default value used to detect non matches */
 +			if (px->geoloc_options & GEOLOC_SRC) {
@@ -466,6 +465,7 @@ index 19ddbec..d2a9ae3 100644
 +					}
 +				}
 +			}
++			do_geoloc = 1;
 +		}
 +		if (txn->geoloc || (px == s->fe)) {
 +			break;
@@ -518,7 +518,7 @@ index 19ddbec..d2a9ae3 100644
  				break;
  			}
  
-+			if (px->geoloc_expr && chunk_replace(&trash, "${geoloc}", txn->geoloc ? txn->geoloc : "", location_ofs) < 0) {
++			if (do_geoloc && chunk_replace(&trash, "${geoloc}", txn->geoloc ? txn->geoloc : "", location_ofs) < 0) {
 +				goto return_bad_req;
 +			}
 +
