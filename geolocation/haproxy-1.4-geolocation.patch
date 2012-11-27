@@ -1,21 +1,21 @@
-From 21606676de2972862afbec7b637454a18235aaf5 Mon Sep 17 00:00:00 2001
+From 36a823d82195c9d2362308f3bbefe9b80d7d3bf5 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Mon, 26 Nov 2012 22:42:52 +0100
+Date: Tue, 27 Nov 2012 16:01:11 +0100
 Subject: [PATCH] Geolocation based on haproxy 1.4.22
 
 ---
- include/proto/acl.h        |  4 +++
- include/proto/buffers.h    |  1 +
- include/proto/proto_http.h |  4 +++
- include/types/acl.h        |  1 +
- include/types/proto_http.h |  1 +
- include/types/proxy.h      |  8 +++++
- src/acl.c                  | 56 +++++++++++++++++++++++++++--
- src/buffers.c              | 48 +++++++++++++++++++++++++
- src/cfgparse.c             | 72 +++++++++++++++++++++++++++++++++++++
- src/haproxy.c              |  3 ++
- src/proto_http.c           | 90 ++++++++++++++++++++++++++++++++++++++++++++--
- 11 files changed, 283 insertions(+), 5 deletions(-)
+ include/proto/acl.h        |    4 ++
+ include/proto/buffers.h    |    1 +
+ include/proto/proto_http.h |    4 ++
+ include/types/acl.h        |    1 +
+ include/types/proto_http.h |    1 +
+ include/types/proxy.h      |    8 ++++
+ src/acl.c                  |   56 +++++++++++++++++++++-
+ src/buffers.c              |   48 +++++++++++++++++++
+ src/cfgparse.c             |   72 ++++++++++++++++++++++++++++
+ src/haproxy.c              |    3 ++
+ src/proto_http.c           |  113 ++++++++++++++++++++++++++++++++++++++++++--
+ 11 files changed, 306 insertions(+), 5 deletions(-)
 
 diff --git a/include/proto/acl.h b/include/proto/acl.h
 index 9b556ba..73ba79e 100644
@@ -373,60 +373,97 @@ index 6141a5b..eb82c2c 100644
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index dc65cbd..7d11a50 100644
+index dc65cbd..ff1ee07 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
-@@ -3123,6 +3123,49 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
- 		}
- 	}
+@@ -3071,6 +3071,70 @@ int http_process_req_stat_post(struct session *s, struct buffer *req)
+ 	return 1;
+ }
  
-+	if (px->geoloc_expr) {
-+		struct in_addr ip;
++/*
++ * Determine the request geolocation from the session. If both the backend and
++ * the frontend provide a geolocation rule, then the backend is predominant.
++ * Returns 1 if a geolocation rule exists or zero if none is defined.
++ */
++static int geolocate(struct session *s)
++{
++	struct http_txn *txn = &s->txn;
++	int do_geoloc;
++	struct proxy *px;
 +
-+		ip.s_addr = 0;
-+		if (px->geoloc_options & GEOLOC_SRC) {
-+			if (s->cli_addr.ss_family == AF_INET)
-+				ip.s_addr = ((struct sockaddr_in *)&s->cli_addr)->sin_addr.s_addr;
-+		}
-+		else if (px->geoloc_options & GEOLOC_HDR) {
-+			ip.s_addr = htonl(get_ip_from_hdr2(&s->txn.req,
-+				px->geoloc_hdr_name,
-+				px->geoloc_hdr_len,
-+				&s->txn.hdr_idx,
-+				px->geoloc_hdr_occ));
-+		}
++	do_geoloc = (txn->geoloc != 0); /* The transaction is geolocated, which means a previous rule exists */
++	px = s->be;
++	while (1) {
++		if (px->geoloc_expr) {
++			do_geoloc = 1;
++			struct in_addr ip;
 +
-+		if (ip.s_addr) {
-+			struct acl_test test;
-+			memset(&test, 0, sizeof(test));
-+			test.ptr = (void *) &ip.s_addr;
-+			test.i = AF_INET;
-+
-+			struct ebmb_node *node = NULL;
-+			if (!eb_is_empty(&px->geoloc_expr->pattern_tree)) {
-+				/* a tree is present, let's check what type it is */
-+				node = acl_lookup_ip(&test, px->geoloc_expr);
++			ip.s_addr = 0;
++			if (px->geoloc_options & GEOLOC_SRC) {
++				if (s->cli_addr.ss_family == AF_INET)
++					ip.s_addr = ((struct sockaddr_in *)&s->cli_addr)->sin_addr.s_addr;
 +			}
-+			if (node) {
-+				txn->geoloc = (char *) (node->key + 4);
++			else if (px->geoloc_options & GEOLOC_HDR) {
++				ip.s_addr = htonl(get_ip_from_hdr2(&s->txn.req,
++					px->geoloc_hdr_name,
++					px->geoloc_hdr_len,
++					&s->txn.hdr_idx,
++					px->geoloc_hdr_occ));
 +			}
-+			else {
-+				struct acl_pattern *pattern;
-+				/* call the match() function for all tests on this value */
-+				list_for_each_entry(pattern, &px->geoloc_expr->patterns, list) {
-+					if (px->geoloc_expr->kw->match(&test, pattern)) {
-+						txn->geoloc = pattern->ptr.str;
-+						break;
++
++			if (ip.s_addr) {
++				struct acl_test test;
++				memset(&test, 0, sizeof(test));
++				test.ptr = (void *) &ip.s_addr;
++				test.i = AF_INET;
++				struct ebmb_node *node = NULL;
++				if (!eb_is_empty(&px->geoloc_expr->pattern_tree)) {
++					/* a tree is present, let's check what type it is */
++					node = acl_lookup_ip(&test, px->geoloc_expr);
++				}
++				if (node) {
++					txn->geoloc = (char *) (node->key + 4);
++				}
++				else {
++					struct acl_pattern *pattern;
++					/* call the match() function for all tests on this value */
++					list_for_each_entry(pattern, &px->geoloc_expr->patterns, list) {
++						if (px->geoloc_expr->kw->match(&test, pattern)) {
++							txn->geoloc = pattern->ptr.str;
++							break;
++						}
 +					}
 +				}
 +			}
 +		}
++		if (txn->geoloc || (px == s->fe)) {
++			break;
++		}
++		px = s->fe;
 +	}
-+			
++	return do_geoloc;
++}
++
+ /* This stream analyser runs all HTTP request processing which is common to
+  * frontends and backends, which means blocking ACLs, filters, connection-close,
+  * reqadd, stats and redirects. This is performed for the designated proxy.
+@@ -3087,6 +3151,7 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
+ 	struct redirect_rule *rule;
+ 	struct cond_wordlist *wl;
+ 	int do_stats;
++	int do_geoloc;
+ 
+ 	if (unlikely(msg->msg_state < HTTP_MSG_BODY)) {
+ 		/* we need more data */
+@@ -3123,6 +3188,7 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
+ 		}
+ 	}
+ 
++	do_geoloc = geolocate(s);
  	do_stats = stats_check_uri(s, px);
  
  	list_for_each_entry(req_acl, (do_stats?&px->uri_auth->req_acl:&px->req_acl), list) {
-@@ -3351,6 +3394,7 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
+@@ -3351,6 +3417,7 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
  		if (ret) {
  			struct chunk rdr = { .str = trash, .size = trashlen, .len = 0 };
  			const char *msg_fmt;
@@ -434,7 +471,7 @@ index dc65cbd..7d11a50 100644
  
  			/* build redirect message */
  			switch(rule->code) {
-@@ -3369,6 +3413,8 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
+@@ -3369,6 +3436,8 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
  			if (unlikely(!chunk_strcpy(&rdr, msg_fmt)))
  				goto return_bad_req;
  
@@ -443,18 +480,18 @@ index dc65cbd..7d11a50 100644
  			switch(rule->type) {
  			case REDIRECT_TYPE_PREFIX: {
  				const char *path;
-@@ -3431,6 +3477,10 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
+@@ -3431,6 +3500,10 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
  				break;
  			}
  
-+			if (px->geoloc_expr && chunk_replace(&rdr, "${geoloc}", txn->geoloc ? txn->geoloc : "", location_ofs) < 0) {
++			if (do_geoloc && chunk_replace(&rdr, "${geoloc}", txn->geoloc ? txn->geoloc : "", location_ofs) < 0) {
 +				goto return_bad_req;
 +			}
 +
  			if (rule->cookie_len) {
  				memcpy(rdr.str + rdr.len, "\r\nSet-Cookie: ", 14);
  				rdr.len += 14;
-@@ -7646,6 +7696,7 @@ void http_end_txn(struct session *s)
+@@ -7646,6 +7719,7 @@ void http_end_txn(struct session *s)
  	txn->uri = NULL;
  	txn->srv_cookie = NULL;
  	txn->cli_cookie = NULL;
@@ -462,7 +499,7 @@ index dc65cbd..7d11a50 100644
  
  	if (txn->req.cap) {
  		struct cap_hdr *h;
-@@ -8185,9 +8236,8 @@ acl_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, char *sol,
+@@ -8185,9 +8259,8 @@ acl_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, char *sol,
  	return 0;
  }
  
@@ -474,7 +511,7 @@ index dc65cbd..7d11a50 100644
  {
  	struct http_txn *txn = l7;
  
-@@ -8344,6 +8394,37 @@ acl_fetch_http_auth(struct proxy *px, struct session *s, void *l7, int dir,
+@@ -8344,6 +8417,37 @@ acl_fetch_http_auth(struct proxy *px, struct session *s, void *l7, int dir,
  	return 1;
  }
  
@@ -512,7 +549,7 @@ index dc65cbd..7d11a50 100644
  /************************************************************************/
  /*             All supported keywords must be declared here.            */
  /************************************************************************/
-@@ -8424,6 +8505,9 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -8424,6 +8528,9 @@ static struct acl_kw_list acl_kws = {{ },{
  	{ "http_auth",       acl_parse_nothing, acl_fetch_http_auth, acl_match_auth, ACL_USE_L7REQ_PERMANENT },
  	{ "http_auth_group", acl_parse_strcat,  acl_fetch_http_auth, acl_match_auth, ACL_USE_L7REQ_PERMANENT },
  	{ "http_first_req",  acl_parse_nothing, acl_fetch_http_first_req, acl_match_nothing, ACL_USE_L7REQ_PERMANENT },
@@ -523,5 +560,5 @@ index dc65cbd..7d11a50 100644
  }};
  
 -- 
-1.8.0
+1.7.10.4
 
