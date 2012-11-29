@@ -1,23 +1,23 @@
-From 4df7acc4090974f71163aa80be141a0564083f2a Mon Sep 17 00:00:00 2001
+From 41055cf06e2967eeb358c2c54d4248068e37f4ad Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Tue, 27 Nov 2012 16:36:29 +0100
+Date: Thu, 29 Nov 2012 23:23:46 +0100
 Subject: [PATCH] Geolocation based on haproxy 1.5-dev14
 
 ---
- include/common/chunk.h     |    1 +
- include/proto/acl.h        |    4 ++
- include/proto/proto_http.h |    2 +
- include/proto/proto_tcp.h  |    1 +
- include/types/acl.h        |    1 +
- include/types/proto_http.h |    1 +
- include/types/proxy.h      |    8 ++++
- src/acl.c                  |   65 +++++++++++++++++++++++--
- src/cfgparse.c             |   70 +++++++++++++++++++++++++++
- src/chunk.c                |   50 +++++++++++++++++++
- src/haproxy.c              |    3 ++
- src/proto_http.c           |  114 ++++++++++++++++++++++++++++++++++++++++++--
- src/proto_tcp.c            |    5 +-
- 13 files changed, 312 insertions(+), 13 deletions(-)
+ include/common/chunk.h     |   1 +
+ include/proto/acl.h        |   4 ++
+ include/proto/proto_http.h |   2 +
+ include/proto/proto_tcp.h  |   1 +
+ include/types/acl.h        |   1 +
+ include/types/proto_http.h |   1 +
+ include/types/proxy.h      |   9 ++++
+ src/acl.c                  |  65 ++++++++++++++++++++++--
+ src/cfgparse.c             |  86 +++++++++++++++++++++++++++++++
+ src/chunk.c                |  50 ++++++++++++++++++
+ src/haproxy.c              |   7 +++
+ src/proto_http.c           | 123 +++++++++++++++++++++++++++++++++++++++++++--
+ src/proto_tcp.c            |   5 +-
+ 13 files changed, 343 insertions(+), 12 deletions(-)
 
 diff --git a/include/common/chunk.h b/include/common/chunk.h
 index 191f9e7..d35746e 100644
@@ -32,7 +32,7 @@ index 191f9e7..d35746e 100644
  static inline void chunk_reset(struct chunk *chk)
  {
 diff --git a/include/proto/acl.h b/include/proto/acl.h
-index 38ad604..8f5f3f5 100644
+index 38ad604..50bd192 100644
 --- a/include/proto/acl.h
 +++ b/include/proto/acl.h
 @@ -213,6 +213,10 @@ int acl_match_ip(struct sample *smp, struct acl_pattern *pattern);
@@ -40,8 +40,8 @@ index 38ad604..8f5f3f5 100644
  int acl_match_reg(struct sample *smp, struct acl_pattern *pattern);
  
 +void *acl_lookup_ip(struct sample *smp, struct acl_expr *expr);
-+int init_geoloc_expr(char *filename, struct acl_expr **geoloc_expr, char **err);
-+void deinit_geoloc_expr(struct acl_expr *expr);
++int init_geolocate(char *filename, struct acl_expr **geolocate, char **err);
++void deinit_geolocate(struct acl_expr *expr);
 +
  #endif /* _PROTO_ACL_H */
  
@@ -96,7 +96,7 @@ index ef9e125..74ee637 100644
  	int cookie_last_date;           /* if non-zero, last date the expirable cookie was set/seen */
  
 diff --git a/include/types/proxy.h b/include/types/proxy.h
-index 5d99423..d8bf269 100644
+index 5d99423..8974936 100644
 --- a/include/types/proxy.h
 +++ b/include/types/proxy.h
 @@ -178,6 +178,9 @@ enum {
@@ -109,7 +109,7 @@ index 5d99423..d8bf269 100644
  struct error_snapshot {
  	struct timeval when;		/* date of this event, (tv_sec == 0) means "never" */
  	unsigned int len;		/* original length of the last invalid request/response */
-@@ -347,6 +350,11 @@ struct proxy {
+@@ -347,6 +350,12 @@ struct proxy {
  	int bind_hdr_len;			/* length of the name of the header above */
  	int bind_hdr_occ;			/* occurrence number of header above: >0 = from first, <0 = from end, 0=disabled */
  #endif
@@ -117,12 +117,13 @@ index 5d99423..d8bf269 100644
 +	char *geoloc_hdr_name;			/* header name used for geolocation if defined */
 +	int geoloc_hdr_len;			/* length of the name of the header above */
 +	int geoloc_hdr_occ;			/* occurrence number of header above: >0 = from first, <0 = from end, 0=disabled */
-+	struct acl_expr *geoloc_expr;		/* special acl expression reserved for the geolocation */
++	struct acl_expr *geolocate;		/* special acl expression reserved for the geolocation */
++	struct acl_cond *geolocate_cond;	/* acl condition to meet before applying geolocation */
  	struct error_snapshot invalid_req, invalid_rep; /* captures of last errors */
  
  	/* used only during configuration parsing */
 diff --git a/src/acl.c b/src/acl.c
-index cba89ab..6c7b22b 100644
+index cba89ab..1ce0df4 100644
 --- a/src/acl.c
 +++ b/src/acl.c
 @@ -506,7 +506,7 @@ int acl_match_bin(struct sample *smp, struct acl_pattern *pattern)
@@ -147,7 +148,7 @@ index cba89ab..6c7b22b 100644
  		 * once again is null.
  		 */
  		pattern->type = SMP_T_IPV4;
-+		
++
  		if (mask + (mask & -mask) == 0 && tree) {
 +			int len = (pattern->ptr.str ? strlen(pattern->ptr.str) + 1 : 0); /* optional null terminated string length */
  			mask = mask ? 33 - flsnz(mask & -mask) : 0; /* equals cidr value */
@@ -184,10 +185,10 @@ index cba89ab..6c7b22b 100644
 +			while (*c && *c != '\n' && *c != '\r' && *c != '\t' && *c != ' ')
 +				c++;
 +			while (*c == ' ' || *c == '\t')
-+				*c++ = 0;			
++				*c++ = 0;
 +			value = c;
 +		}
-+		
++
  		while (*c && *c != '\n' && *c != '\r')
  			c++;
  		*c = 0;
@@ -210,7 +211,7 @@ index cba89ab..6c7b22b 100644
 +/*
 + * Initialize a specific acl expression used for geolocation.
 + */
-+int init_geoloc_expr(char *filename, struct acl_expr **geoloc_expr, char **err) {
++int init_geolocate(char *filename, struct acl_expr **geolocate, char **err) {
 +	struct acl_keyword *aclkw;
 +	struct acl_expr *expr;
 +
@@ -232,7 +233,7 @@ index cba89ab..6c7b22b 100644
 +	expr->pattern_tree = EB_ROOT_UNIQUE;
 +	expr->args = empty_arg_list;
 +
-+	*geoloc_expr = expr;
++	*geolocate = expr;
 +
 +	return acl_read_patterns_from_file(expr->kw, expr, filename, ACL_PAT_F_FROM_FILE | ACL_PAT_F_DICTIONARY, err);
 +}
@@ -240,7 +241,7 @@ index cba89ab..6c7b22b 100644
 +/*
 + * Purge the gelocation expression and free memory.
 + */
-+void deinit_geoloc_expr(struct acl_expr *expr) {
++void deinit_geolocate(struct acl_expr *expr) {
 +	prune_acl_expr(expr);
 +	free(expr);
 +}
@@ -249,10 +250,10 @@ index cba89ab..6c7b22b 100644
  /*             All supported keywords must be declared here.            */
  /************************************************************************/
 diff --git a/src/cfgparse.c b/src/cfgparse.c
-index 9fa1881..f3f062b 100644
+index 9fa1881..65a81c5 100644
 --- a/src/cfgparse.c
 +++ b/src/cfgparse.c
-@@ -5511,6 +5511,76 @@ stats_error_parsing:
+@@ -5511,6 +5511,92 @@ stats_error_parsing:
  				goto out;
  		}
  	}
@@ -312,7 +313,7 @@ index 9fa1881..f3f062b 100644
 +		}
 +		cur_arg++;
 +		if (*args[cur_arg]) {
-+			if (!init_geoloc_expr(args[cur_arg], &curproxy->geoloc_expr, &errmsg)) {
++			if (!init_geolocate(args[cur_arg], &curproxy->geolocate, &errmsg)) {
 +				Alert("parsing [%s:%d] : %s: error detected while processing geolocation rule : %s\n",
 +					file, linenum, args[0], errmsg);
 +				err_code |= ERR_ALERT | ERR_FATAL;
@@ -322,6 +323,22 @@ index 9fa1881..f3f062b 100644
 +		else {
 +			Alert("parsing [%s:%d] : '%s' expects <filename> as argument.\n",
 +				file, linenum, args[0]);
++			err_code |= ERR_ALERT | ERR_FATAL;
++			goto out;
++		}
++		cur_arg++;
++		if ((strcmp(args[cur_arg], "if") == 0 || strcmp(args[cur_arg], "unless") == 0)) {
++			if ((curproxy->geolocate_cond = build_acl_cond(file, linenum, curproxy, (const char **)args+cur_arg, &errmsg)) == NULL) {
++				Alert("parsing [%s:%d] : error detected while parsing a '%s' condition : %s.\n",
++				      file, linenum, args[0], errmsg);
++				err_code |= ERR_ALERT | ERR_FATAL;
++				goto out;
++			}
++			err_code |= warnif_cond_requires_resp(cond, file, linenum);
++		}
++		else if (*args[cur_arg]) {
++			Alert("parsing [%s:%d] : '%s' : Expecting nothing, 'if', or 'unless', got '%s'.\n",
++			      file, linenum, args[0], args[cur_arg]);
 +			err_code |= ERR_ALERT | ERR_FATAL;
 +			goto out;
 +		}
@@ -391,24 +408,28 @@ index d027569..7182abb 100644
   * Local variables:
   *  c-indent-level: 8
 diff --git a/src/haproxy.c b/src/haproxy.c
-index b5f9f39..18d7203 100644
+index b5f9f39..e6515e8 100644
 --- a/src/haproxy.c
 +++ b/src/haproxy.c
-@@ -1026,6 +1026,9 @@ void deinit(void)
+@@ -1026,6 +1026,13 @@ void deinit(void)
  		deinit_stick_rules(&p->storersp_rules);
  		deinit_stick_rules(&p->sticking_rules);
  
-+		if (p->geoloc_expr)
-+			deinit_geoloc_expr(p->geoloc_expr);
++		if (p->geolocate)
++			deinit_geolocate(p->geolocate);
++		if (p->geolocate_cond) {
++			prune_acl_cond(p->geolocate_cond);
++			free(p->geolocate_cond);
++		}
 +
  		free(p->appsession_name);
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index 19ddbec..c59c286 100644
+index 19ddbec..dd0c792 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
-@@ -2947,6 +2947,69 @@ http_check_access_rule(struct proxy *px, struct list *rules, struct session *s,
+@@ -2947,6 +2947,80 @@ http_check_access_rule(struct proxy *px, struct list *rules, struct session *s,
  	return NULL;
  }
  
@@ -426,41 +447,52 @@ index 19ddbec..c59c286 100644
 +	do_geoloc = (txn->geoloc != 0); /* The transaction is geolocated, which means a previous rule exists */
 +	px = s->be;
 +	while (1) {
-+		if (px->geoloc_expr) {
-+			struct sample smp;
-+			smp.type = SMP_TYPES; /* default value used to detect non matches */
-+			if (px->geoloc_options & GEOLOC_SRC) {
-+				struct arg args[0];
-+				smp_fetch_src(px, s, txn, SMP_OPT_DIR_REQ, args, &smp);
++		if (px->geolocate) {
++			int ret = 1;
++			if (px->geolocate_cond) {
++				struct acl_cond *cond = px->geolocate_cond;
++				ret = acl_exec_cond(cond, px, s, txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL);
++
++				ret = acl_pass(ret);
++				if (cond->pol == ACL_COND_UNLESS)
++					ret = !ret;
 +			}
-+			else if (px->geoloc_options & GEOLOC_HDR) {
-+				struct arg args[2];
-+				args[0].type = ARGT_STR;
-+				args[0].data.str.str = px->geoloc_hdr_name;
-+				args[0].data.str.len = px->geoloc_hdr_len;
-+
-+				args[1].type = ARGT_SINT;
-+				args[1].data.uint = px->geoloc_hdr_occ;
-+
-+				smp_fetch_hdr_ip(px, s, txn, SMP_OPT_DIR_REQ, args, &smp);
-+			}
-+
-+			if (smp.type == SMP_T_IPV4 || smp.type == SMP_T_IPV6) {
-+				struct ebmb_node *node = NULL;
-+				if (!eb_is_empty(&px->geoloc_expr->pattern_tree)) {
-+					/* a tree is present, let's check what type it is */
-+					node = acl_lookup_ip(&smp, px->geoloc_expr);
++			if (ret) {
++				struct sample smp;
++				smp.type = SMP_TYPES; /* default value used to detect non matches */
++				if (px->geoloc_options & GEOLOC_SRC) {
++					struct arg args[0];
++					smp_fetch_src(px, s, txn, SMP_OPT_DIR_REQ, args, &smp);
 +				}
-+				if (node) {
-+					txn->geoloc = (char *) (node->key + 4);
++				else if (px->geoloc_options & GEOLOC_HDR) {
++					struct arg args[2];
++					args[0].type = ARGT_STR;
++					args[0].data.str.str = px->geoloc_hdr_name;
++					args[0].data.str.len = px->geoloc_hdr_len;
++
++					args[1].type = ARGT_SINT;
++					args[1].data.uint = px->geoloc_hdr_occ;
++
++					smp_fetch_hdr_ip(px, s, txn, SMP_OPT_DIR_REQ, args, &smp);
 +				}
-+				else {
-+					struct acl_pattern *pattern;
-+					/* call the match() function for all tests on this value */
-+					list_for_each_entry(pattern, &px->geoloc_expr->patterns, list) {
-+						if (px->geoloc_expr->kw->match(&smp, pattern)) {
-+							txn->geoloc = pattern->ptr.str;
-+							break;
++
++				if (smp.type == SMP_T_IPV4 || smp.type == SMP_T_IPV6) {
++					struct ebmb_node *node = NULL;
++					if (!eb_is_empty(&px->geolocate->pattern_tree)) {
++						/* a tree is present, let's check what type it is */
++						node = acl_lookup_ip(&smp, px->geolocate);
++					}
++					if (node) {
++						txn->geoloc = (char *) (node->key + 4);
++					}
++					else {
++						struct acl_pattern *pattern;
++						/* call the match() function for all tests on this value */
++						list_for_each_entry(pattern, &px->geolocate->patterns, list) {
++							if (px->geolocate->kw->match(&smp, pattern)) {
++								txn->geoloc = pattern->ptr.str;
++								break;
++							}
 +						}
 +					}
 +				}
@@ -478,7 +510,7 @@ index 19ddbec..c59c286 100644
  /* This stream analyser runs all HTTP request processing which is common to
   * frontends and backends, which means blocking ACLs, filters, connection-close,
   * reqadd, stats and redirects. This is performed for the designated proxy.
-@@ -2963,6 +3026,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -2963,6 +3037,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  	struct redirect_rule *rule;
  	struct cond_wordlist *wl;
  	int do_stats;
@@ -486,7 +518,7 @@ index 19ddbec..c59c286 100644
  
  	if (unlikely(msg->msg_state < HTTP_MSG_BODY)) {
  		/* we need more data */
-@@ -3134,6 +3198,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3134,6 +3209,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  		goto return_prx_cond;
  	}
  
@@ -495,17 +527,15 @@ index 19ddbec..c59c286 100644
  	/* add request headers from the rule sets in the same order */
  	list_for_each_entry(wl, &px->req_add, list) {
  		if (wl->cond) {
-@@ -3232,7 +3298,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3232,6 +3309,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  
  		if (ret) {
  			const char *msg_fmt;
--
 +			int location_ofs;
-+			
+ 
  			/* build redirect message */
  			switch(rule->code) {
- 			case 303:
-@@ -3250,6 +3317,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3250,6 +3328,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  			if (unlikely(!chunk_strcpy(&trash, msg_fmt)))
  				goto return_bad_req;
  
@@ -514,7 +544,7 @@ index 19ddbec..c59c286 100644
  			switch(rule->type) {
  			case REDIRECT_TYPE_SCHEME: {
  				const char *path;
-@@ -3377,6 +3446,10 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3377,6 +3457,10 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  				break;
  			}
  
@@ -525,7 +555,7 @@ index 19ddbec..c59c286 100644
  			if (rule->cookie_len) {
  				memcpy(trash.str + trash.len, "\r\nSet-Cookie: ", 14);
  				trash.len += 14;
-@@ -7780,7 +7853,7 @@ void http_end_txn(struct session *s)
+@@ -7780,7 +7864,7 @@ void http_end_txn(struct session *s)
  	txn->uri = NULL;
  	txn->srv_cookie = NULL;
  	txn->cli_cookie = NULL;
@@ -534,7 +564,7 @@ index 19ddbec..c59c286 100644
  	if (txn->req.cap) {
  		struct cap_hdr *h;
  		for (h = s->fe->req_cap; h; h = h->next)
-@@ -8339,9 +8412,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
+@@ -8339,9 +8423,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
   * and an optional one of type int to designate a specific occurrence.
   * It returns an IPv4 or IPv6 address.
   */
@@ -546,7 +576,7 @@ index 19ddbec..c59c286 100644
  {
  	int ret;
  
-@@ -8441,6 +8513,35 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+@@ -8441,6 +8524,35 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
  	return 1;
  }
  
@@ -561,7 +591,7 @@ index 19ddbec..c59c286 100644
 +
 +	if (!txn->geoloc)
 +		return 0;
-+	
++
 +	strcpy(trash.str, txn->geoloc);
 +	smp->type = SMP_T_STR;
 +	smp->data.str.str = trash.str;
@@ -582,7 +612,7 @@ index 19ddbec..c59c286 100644
  static int
  acl_fetch_proto_http(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
                       const struct arg *args, struct sample *smp)
-@@ -8974,6 +9075,8 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -8974,6 +9086,8 @@ static struct acl_kw_list acl_kws = {{ },{
  	{ "cook_sub",        acl_parse_str,     smp_fetch_cookie,         acl_match_sub,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
  	{ "cook_val",        acl_parse_int,     smp_fetch_cookie_val,     acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
  
@@ -591,7 +621,7 @@ index 19ddbec..c59c286 100644
  	{ "hdr",             acl_parse_str,     smp_fetch_hdr,            acl_match_str,     ACL_USE_L7REQ_VOLATILE|ACL_MAY_LOOKUP, ARG2(0,STR,SINT), val_hdr },
  	{ "hdr_beg",         acl_parse_str,     smp_fetch_hdr,            acl_match_beg,     ACL_USE_L7REQ_VOLATILE, ARG2(0,STR,SINT), val_hdr },
  	{ "hdr_cnt",         acl_parse_int,     smp_fetch_hdr_cnt,        acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
-@@ -9062,6 +9165,7 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -9062,6 +9176,7 @@ static struct acl_kw_list acl_kws = {{ },{
  static struct sample_fetch_kw_list sample_fetch_keywords = {{ },{
  	{ "hdr",        smp_fetch_hdr,            ARG2(1,STR,SINT), val_hdr, SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
  	{ "base",       smp_fetch_base,           0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
@@ -616,5 +646,5 @@ index 5516036..bcd63d9 100644
  	switch (l4->si[0].conn->addr.from.ss_family) {
  	case AF_INET:
 -- 
-1.7.10.4
+1.8.0
 
