@@ -1,7 +1,7 @@
-From 41055cf06e2967eeb358c2c54d4248068e37f4ad Mon Sep 17 00:00:00 2001
+From bf6cd7b36a0ceaf44f741afe45058836b851e4b9 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Thu, 29 Nov 2012 23:23:46 +0100
-Subject: [PATCH] Geolocation based on haproxy 1.5-dev14
+Date: Fri, 28 Dec 2012 17:58:18 +0100
+Subject: [PATCH] Geolocation based on haproxy 1.5-dev17
 
 ---
  include/common/chunk.h     |   1 +
@@ -10,17 +10,17 @@ Subject: [PATCH] Geolocation based on haproxy 1.5-dev14
  include/proto/proto_tcp.h  |   1 +
  include/types/acl.h        |   1 +
  include/types/proto_http.h |   1 +
- include/types/proxy.h      |   9 ++++
- src/acl.c                  |  65 ++++++++++++++++++++++--
- src/cfgparse.c             |  86 +++++++++++++++++++++++++++++++
+ include/types/proxy.h      |  10 ++++
+ src/acl.c                  |  65 +++++++++++++++++++++--
+ src/cfgparse.c             |  86 ++++++++++++++++++++++++++++++
  src/chunk.c                |  50 ++++++++++++++++++
  src/haproxy.c              |   7 +++
- src/proto_http.c           | 123 +++++++++++++++++++++++++++++++++++++++++++--
+ src/proto_http.c           | 129 ++++++++++++++++++++++++++++++++++++++++++---
  src/proto_tcp.c            |   5 +-
- 13 files changed, 343 insertions(+), 12 deletions(-)
+ 13 files changed, 347 insertions(+), 15 deletions(-)
 
 diff --git a/include/common/chunk.h b/include/common/chunk.h
-index 191f9e7..d35746e 100644
+index 18f41af..4e883b5 100644
 --- a/include/common/chunk.h
 +++ b/include/common/chunk.h
 @@ -47,6 +47,7 @@ int chunk_htmlencode(struct chunk *dst, struct chunk *src);
@@ -28,9 +28,9 @@ index 191f9e7..d35746e 100644
  int chunk_strcmp(const struct chunk *chk, const char *str);
  int chunk_strcasecmp(const struct chunk *chk, const char *str);
 +int chunk_replace(struct chunk *chk, const char *token, const char *value, const int ofs);
+ int alloc_trash_buffers(int bufsize);
+ struct chunk *get_trash_chunk(void);
  
- static inline void chunk_reset(struct chunk *chk)
- {
 diff --git a/include/proto/acl.h b/include/proto/acl.h
 index 38ad604..50bd192 100644
 --- a/include/proto/acl.h
@@ -47,12 +47,12 @@ index 38ad604..50bd192 100644
  
  /*
 diff --git a/include/proto/proto_http.h b/include/proto/proto_http.h
-index 48a606f..083bfb2 100644
+index a379909..b7f033a 100644
 --- a/include/proto/proto_http.h
 +++ b/include/proto/proto_http.h
-@@ -111,6 +111,8 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
- void free_http_req_rules(struct list *r);
- struct chunk *http_error_message(struct session *s, int msgnum);
+@@ -113,6 +113,8 @@ struct chunk *http_error_message(struct session *s, int msgnum);
+ struct redirect_rule *http_parse_redirect_rule(const char *file, int line, struct proxy *curproxy,
+                                                const char **args, char **errmsg);
  
 +int smp_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, unsigned int opt, const struct arg *args, struct sample *smp);
 +
@@ -84,10 +84,10 @@ index bf5537f..2fc9cb2 100644
  
  /* what capabilities an ACL uses. These flags are set during parsing, which
 diff --git a/include/types/proto_http.h b/include/types/proto_http.h
-index ef9e125..74ee637 100644
+index 12e446f..0d2ee0d 100644
 --- a/include/types/proto_http.h
 +++ b/include/types/proto_http.h
-@@ -364,6 +364,7 @@ struct http_txn {
+@@ -376,6 +376,7 @@ struct http_txn {
  	char *cli_cookie;               /* cookie presented by the client, in capture mode */
  	char *srv_cookie;               /* cookie presented by the server, in capture mode */
  	char *sessid;                   /* the appsession id, if found in the request or in the response */
@@ -96,10 +96,10 @@ index ef9e125..74ee637 100644
  	int cookie_last_date;           /* if non-zero, last date the expirable cookie was set/seen */
  
 diff --git a/include/types/proxy.h b/include/types/proxy.h
-index 5d99423..8974936 100644
+index ceb14d1..a9dd771 100644
 --- a/include/types/proxy.h
 +++ b/include/types/proxy.h
-@@ -178,6 +178,9 @@ enum {
+@@ -172,6 +172,9 @@ enum {
  #define STK_IS_STORE	0x00000002	/* store on request fetch */
  #define STK_ON_RSP	0x00000004	/* store on response fetch */
  
@@ -109,19 +109,20 @@ index 5d99423..8974936 100644
  struct error_snapshot {
  	struct timeval when;		/* date of this event, (tv_sec == 0) means "never" */
  	unsigned int len;		/* original length of the last invalid request/response */
-@@ -347,6 +350,12 @@ struct proxy {
- 	int bind_hdr_len;			/* length of the name of the header above */
- 	int bind_hdr_occ;			/* occurrence number of header above: >0 = from first, <0 = from end, 0=disabled */
- #endif
+@@ -331,6 +334,13 @@ struct proxy {
+ 	unsigned int backlog;			/* force the frontend's listen backlog */
+ 	unsigned int bind_proc;			/* bitmask of processes using this proxy. 0 = all. */
+ 
 +	int geoloc_options;			/* GEOLOC_SRC, GEOLOC_HDR */
 +	char *geoloc_hdr_name;			/* header name used for geolocation if defined */
 +	int geoloc_hdr_len;			/* length of the name of the header above */
 +	int geoloc_hdr_occ;			/* occurrence number of header above: >0 = from first, <0 = from end, 0=disabled */
 +	struct acl_expr *geolocate;		/* special acl expression reserved for the geolocation */
 +	struct acl_cond *geolocate_cond;	/* acl condition to meet before applying geolocation */
++
+ 	/* warning: these structs are huge, keep them at the bottom */
+ 	struct sockaddr_storage dispatch_addr;	/* the default address to connect to */
  	struct error_snapshot invalid_req, invalid_rep; /* captures of last errors */
- 
- 	/* used only during configuration parsing */
 diff --git a/src/acl.c b/src/acl.c
 index cba89ab..1ce0df4 100644
 --- a/src/acl.c
@@ -250,10 +251,10 @@ index cba89ab..1ce0df4 100644
  /*             All supported keywords must be declared here.            */
  /************************************************************************/
 diff --git a/src/cfgparse.c b/src/cfgparse.c
-index 9fa1881..65a81c5 100644
+index abcb9c5..b058477 100644
 --- a/src/cfgparse.c
 +++ b/src/cfgparse.c
-@@ -5511,6 +5511,92 @@ stats_error_parsing:
+@@ -5371,6 +5371,92 @@ stats_error_parsing:
  				goto out;
  		}
  	}
@@ -347,10 +348,10 @@ index 9fa1881..65a81c5 100644
  		struct cfg_kw_list *kwl;
  		int index;
 diff --git a/src/chunk.c b/src/chunk.c
-index d027569..7182abb 100644
+index 9463abb..551f3e4 100644
 --- a/src/chunk.c
 +++ b/src/chunk.c
-@@ -199,6 +199,56 @@ int chunk_strcasecmp(const struct chunk *chk, const char *str)
+@@ -241,6 +241,56 @@ int chunk_strcasecmp(const struct chunk *chk, const char *str)
  	return diff;
  }
  
@@ -408,10 +409,10 @@ index d027569..7182abb 100644
   * Local variables:
   *  c-indent-level: 8
 diff --git a/src/haproxy.c b/src/haproxy.c
-index b5f9f39..e6515e8 100644
+index 0d826d2..138a03a 100644
 --- a/src/haproxy.c
 +++ b/src/haproxy.c
-@@ -1026,6 +1026,13 @@ void deinit(void)
+@@ -1024,6 +1024,13 @@ void deinit(void)
  		deinit_stick_rules(&p->storersp_rules);
  		deinit_stick_rules(&p->sticking_rules);
  
@@ -426,11 +427,44 @@ index b5f9f39..e6515e8 100644
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index 19ddbec..dd0c792 100644
+index aaa9476..d4922bd 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
-@@ -2947,6 +2947,80 @@ http_check_access_rule(struct proxy *px, struct list *rules, struct session *s,
- 	return NULL;
+@@ -3141,10 +3141,11 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct session
+  * returns non-zero on success, or zero in case of a, irrecoverable error such
+  * as too large a request to build a valid response.
+  */
+-static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *s, struct http_txn *txn)
++static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *s, struct http_txn *txn, int do_geoloc)
+ {
+ 	struct http_msg *msg = &txn->req;
+ 	const char *msg_fmt;
++	int location_ofs;
+ 
+ 	/* build redirect message */
+ 	switch(rule->code) {
+@@ -3162,6 +3163,8 @@ static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *
+ 
+ 	if (unlikely(!chunk_strcpy(&trash, msg_fmt)))
+ 		return 0;
++	
++	location_ofs = trash.len;
+ 
+ 	switch(rule->type) {
+ 	case REDIRECT_TYPE_SCHEME: {
+@@ -3290,6 +3293,10 @@ static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *
+ 		break;
+ 	}
+ 
++	if (do_geoloc && chunk_replace(&trash, "${geoloc}", txn->geoloc ? txn->geoloc : "", location_ofs) < 0) {
++		return 0;
++	}
++
+ 	if (rule->cookie_len) {
+ 		memcpy(trash.str + trash.len, "\r\nSet-Cookie: ", 14);
+ 		trash.len += 14;
+@@ -3354,6 +3361,80 @@ static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *
+ 	return 1;
  }
  
 +/*
@@ -510,7 +544,7 @@ index 19ddbec..dd0c792 100644
  /* This stream analyser runs all HTTP request processing which is common to
   * frontends and backends, which means blocking ACLs, filters, connection-close,
   * reqadd, stats and redirects. This is performed for the designated proxy.
-@@ -2963,6 +3037,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3370,6 +3451,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  	struct redirect_rule *rule;
  	struct cond_wordlist *wl;
  	int do_stats;
@@ -518,7 +552,7 @@ index 19ddbec..dd0c792 100644
  
  	if (unlikely(msg->msg_state < HTTP_MSG_BODY)) {
  		/* we need more data */
-@@ -3134,6 +3209,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3570,6 +3652,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  		goto return_prx_cond;
  	}
  
@@ -527,35 +561,25 @@ index 19ddbec..dd0c792 100644
  	/* add request headers from the rule sets in the same order */
  	list_for_each_entry(wl, &px->req_add, list) {
  		if (wl->cond) {
-@@ -3232,6 +3309,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3586,7 +3670,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+ 	}
  
- 		if (ret) {
- 			const char *msg_fmt;
-+			int location_ofs;
+ 	if (http_req_last_rule && http_req_last_rule->action == HTTP_REQ_ACT_REDIR) {
+-		if (!http_apply_redirect_rule(http_req_last_rule->arg.redir, s, txn))
++		if (!http_apply_redirect_rule(http_req_last_rule->arg.redir, s, txn, do_geoloc))
+ 			goto return_bad_req;
+ 		req->analyse_exp = TICK_ETERNITY;
+ 		return 1;
+@@ -3614,7 +3698,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+ 			if (!ret)
+ 				continue;
+ 		}
+-		if (!http_apply_redirect_rule(rule, s, txn))
++		if (!http_apply_redirect_rule(rule, s, txn, do_geoloc))
+ 			goto return_bad_req;
  
- 			/* build redirect message */
- 			switch(rule->code) {
-@@ -3250,6 +3328,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
- 			if (unlikely(!chunk_strcpy(&trash, msg_fmt)))
- 				goto return_bad_req;
- 
-+			location_ofs = trash.len;
-+
- 			switch(rule->type) {
- 			case REDIRECT_TYPE_SCHEME: {
- 				const char *path;
-@@ -3377,6 +3457,10 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
- 				break;
- 			}
- 
-+			if (do_geoloc && chunk_replace(&trash, "${geoloc}", txn->geoloc ? txn->geoloc : "", location_ofs) < 0) {
-+				goto return_bad_req;
-+			}
-+
- 			if (rule->cookie_len) {
- 				memcpy(trash.str + trash.len, "\r\nSet-Cookie: ", 14);
- 				trash.len += 14;
-@@ -7780,7 +7864,7 @@ void http_end_txn(struct session *s)
+ 		req->analyse_exp = TICK_ETERNITY;
+@@ -8001,7 +8085,7 @@ void http_end_txn(struct session *s)
  	txn->uri = NULL;
  	txn->srv_cookie = NULL;
  	txn->cli_cookie = NULL;
@@ -564,7 +588,7 @@ index 19ddbec..dd0c792 100644
  	if (txn->req.cap) {
  		struct cap_hdr *h;
  		for (h = s->fe->req_cap; h; h = h->next)
-@@ -8339,9 +8423,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
+@@ -8735,9 +8819,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
   * and an optional one of type int to designate a specific occurrence.
   * It returns an IPv4 or IPv6 address.
   */
@@ -576,7 +600,7 @@ index 19ddbec..dd0c792 100644
  {
  	int ret;
  
-@@ -8441,6 +8524,35 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+@@ -8924,6 +9007,35 @@ smp_fetch_base32_src(struct proxy *px, struct session *l4, void *l7, unsigned in
  	return 1;
  }
  
@@ -612,7 +636,7 @@ index 19ddbec..dd0c792 100644
  static int
  acl_fetch_proto_http(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
                       const struct arg *args, struct sample *smp)
-@@ -8974,6 +9086,8 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -9457,6 +9569,8 @@ static struct acl_kw_list acl_kws = {{ },{
  	{ "cook_sub",        acl_parse_str,     smp_fetch_cookie,         acl_match_sub,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
  	{ "cook_val",        acl_parse_int,     smp_fetch_cookie_val,     acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
  
@@ -621,19 +645,19 @@ index 19ddbec..dd0c792 100644
  	{ "hdr",             acl_parse_str,     smp_fetch_hdr,            acl_match_str,     ACL_USE_L7REQ_VOLATILE|ACL_MAY_LOOKUP, ARG2(0,STR,SINT), val_hdr },
  	{ "hdr_beg",         acl_parse_str,     smp_fetch_hdr,            acl_match_beg,     ACL_USE_L7REQ_VOLATILE, ARG2(0,STR,SINT), val_hdr },
  	{ "hdr_cnt",         acl_parse_int,     smp_fetch_hdr_cnt,        acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
-@@ -9062,6 +9176,7 @@ static struct acl_kw_list acl_kws = {{ },{
- static struct sample_fetch_kw_list sample_fetch_keywords = {{ },{
- 	{ "hdr",        smp_fetch_hdr,            ARG2(1,STR,SINT), val_hdr, SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
+@@ -9547,6 +9661,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {{ },{
  	{ "base",       smp_fetch_base,           0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
+ 	{ "base32",     smp_fetch_base32,         0,                NULL,    SMP_T_UINT, SMP_CAP_L7|SMP_CAP_REQ },
+ 	{ "base32+src", smp_fetch_base32_src,     0,                NULL,    SMP_T_BIN,  SMP_CAP_L7|SMP_CAP_REQ },
 +	{ "geoloc",     smp_fetch_geoloc,         0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
  	{ "path",       smp_fetch_path,           0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
  	{ "url",        smp_fetch_url,            0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
  	{ "url_ip",     smp_fetch_url_ip,         0,                NULL,    SMP_T_IPV4, SMP_CAP_L7|SMP_CAP_REQ },
 diff --git a/src/proto_tcp.c b/src/proto_tcp.c
-index 5516036..bcd63d9 100644
+index 7285457..1c7aeca 100644
 --- a/src/proto_tcp.c
 +++ b/src/proto_tcp.c
-@@ -1521,9 +1521,8 @@ acl_fetch_rdp_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigne
+@@ -1509,9 +1509,8 @@ acl_fetch_rdp_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigne
  
  
  /* fetch the connection's source IPv4/IPv6 address */
