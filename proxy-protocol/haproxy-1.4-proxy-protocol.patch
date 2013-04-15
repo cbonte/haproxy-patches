@@ -1,7 +1,7 @@
-From b9044d6a1d82fdbd718d6a255259d41b4f2e0a54 Mon Sep 17 00:00:00 2001
+From af2038557a14bf6e2915bed545e216a0f1a95fc5 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Mon, 26 Nov 2012 23:12:18 +0100
-Subject: [PATCH] Proxy Protocol based on haproxy 1.4.22
+Date: Mon, 15 Apr 2013 22:05:00 +0200
+Subject: [PATCH] Proxy Protocol based on haproxy 1.4.23
 
 ---
  doc/configuration.txt     |  26 ++++++-
@@ -17,10 +17,10 @@ Subject: [PATCH] Proxy Protocol based on haproxy 1.4.22
  10 files changed, 275 insertions(+), 19 deletions(-)
 
 diff --git a/doc/configuration.txt b/doc/configuration.txt
-index e5d9af5..1f41863 100644
+index ad07553..3ba7dba 100644
 --- a/doc/configuration.txt
 +++ b/doc/configuration.txt
-@@ -1339,6 +1339,7 @@ bind [<address>]:<port_range> [, ...] transparent
+@@ -1343,6 +1343,7 @@ bind [<address>]:<port_range> [, ...] transparent
  bind [<address>]:<port_range> [, ...] id <id>
  bind [<address>]:<port_range> [, ...] name <name>
  bind [<address>]:<port_range> [, ...] defer-accept
@@ -28,7 +28,7 @@ index e5d9af5..1f41863 100644
    Define one or several listening addresses and/or ports in a frontend.
    May be used in sections :   defaults | frontend | listen | backend
                                    no   |    yes   |   yes  |   no
-@@ -1419,6 +1420,19 @@ bind [<address>]:<port_range> [, ...] defer-accept
+@@ -1423,6 +1424,19 @@ bind [<address>]:<port_range> [, ...] defer-accept
                    with front firewalls which would see an established
                    connection while the proxy will only see it in SYN_RECV.
  
@@ -48,7 +48,7 @@ index e5d9af5..1f41863 100644
    It is possible to specify a list of address:port combinations delimited by
    commas. The frontend will then listen on all of these addresses. There is no
    fixed limit to the number of addresses and ports which can be listened on in
-@@ -1429,8 +1443,10 @@ bind [<address>]:<port_range> [, ...] defer-accept
+@@ -1433,8 +1447,10 @@ bind [<address>]:<port_range> [, ...] defer-accept
          listen http_proxy
              bind :80,:443
              bind 10.0.0.1:10080,10.0.0.1:10443
@@ -60,7 +60,7 @@ index e5d9af5..1f41863 100644
  
  
  bind-process [ all | odd | even | <number 1-32> ] ...
-@@ -7231,7 +7247,9 @@ marked with a star ('*') after the field name below.
+@@ -7237,7 +7253,9 @@ marked with a star ('*') after the field name below.
  
  Detailed fields description :
    - "client_ip" is the IP address of the client which initiated the TCP
@@ -71,7 +71,7 @@ index e5d9af5..1f41863 100644
  
    - "client_port" is the TCP port of the client which initiated the connection.
  
-@@ -7404,7 +7422,9 @@ with a star ('*') after the field name below.
+@@ -7410,7 +7428,9 @@ with a star ('*') after the field name below.
  
  Detailed fields description :
    - "client_ip" is the IP address of the client which initiated the TCP
@@ -83,7 +83,7 @@ index e5d9af5..1f41863 100644
    - "client_port" is the TCP port of the client which initiated the connection.
  
 diff --git a/include/common/standard.h b/include/common/standard.h
-index cd1a609..7ea0549 100644
+index 064d216..bc56ab6 100644
 --- a/include/common/standard.h
 +++ b/include/common/standard.h
 @@ -269,6 +269,28 @@ static inline unsigned int __strl2uic(const char *s, int len)
@@ -183,7 +183,7 @@ index c13c73d..ed0d403 100644
  /* The listener will be directly referenced by the fdtab[] which holds its
   * socket. The listener provides the protocol-specific accept() function to
 diff --git a/src/cfgparse.c b/src/cfgparse.c
-index 643f065..45b8de8 100644
+index 345b415..229ae2b 100644
 --- a/src/cfgparse.c
 +++ b/src/cfgparse.c
 @@ -1467,6 +1467,16 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
@@ -212,7 +212,7 @@ index 643f065..45b8de8 100644
  			      file, linenum, args[0]);
  			err_code |= ERR_ALERT | ERR_FATAL;
  			goto out;
-@@ -5732,6 +5742,9 @@ out_uri_auth_compat:
+@@ -5726,6 +5736,9 @@ out_uri_auth_compat:
  			listener->handler = process_session;
  			listener->analysers |= curproxy->fe_req_ana;
  
@@ -427,10 +427,10 @@ index 1fa9aa4..6c7ed13 100644
   * SN_FRT_ADDR_SET flag.
   */
 diff --git a/src/proto_http.c b/src/proto_http.c
-index dc65cbd..36c3d6b 100644
+index a768eb5..1836a4c 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
-@@ -4127,7 +4127,8 @@ void http_end_txn_clean_session(struct session *s)
+@@ -4156,7 +4156,8 @@ void http_end_txn_clean_session(struct session *s)
  	if (s->rep->lr >= s->rep->data + s->rep->size)
  		s->rep->lr -= s->req->size;
  
@@ -440,7 +440,7 @@ index dc65cbd..36c3d6b 100644
  	s->rep->analysers = 0;
  
  	http_silent_debug(__LINE__, s);
-@@ -7670,7 +7671,6 @@ void http_reset_txn(struct session *s)
+@@ -7739,7 +7740,6 @@ void http_reset_txn(struct session *s)
  	http_init_txn(s);
  
  	s->be = s->fe;
@@ -449,7 +449,7 @@ index dc65cbd..36c3d6b 100644
  	s->srv = s->prev_srv = s->srv_conn = NULL;
  	/* re-init store persistence */
 diff --git a/src/session.c b/src/session.c
-index 0f6a1cf..c411ebc 100644
+index 6211a45..c17d490 100644
 --- a/src/session.c
 +++ b/src/session.c
 @@ -34,6 +34,7 @@
@@ -460,7 +460,7 @@ index 0f6a1cf..c411ebc 100644
  #include <proto/stick_table.h>
  #include <proto/stream_interface.h>
  #include <proto/stream_sock.h>
-@@ -1055,6 +1056,12 @@ resync_stream_interface:
+@@ -1071,6 +1072,12 @@ resync_stream_interface:
  			while (ana_list && max_loops--) {
  				/* Warning! ensure that analysers are always placed in ascending order! */
  
@@ -505,5 +505,5 @@ index 31fea91..0bb58b3 100644
  	dig1 = dig10 = dig100 = ascii_zero;
  	s = 24;
 -- 
-1.8.0
+1.8.1.2
 
