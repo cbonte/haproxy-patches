@@ -1,7 +1,7 @@
-From bf6cd7b36a0ceaf44f741afe45058836b851e4b9 Mon Sep 17 00:00:00 2001
+From b95894ecb6724eab22902d18facb9c536568ca12 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Fri, 28 Dec 2012 17:58:18 +0100
-Subject: [PATCH] Geolocation based on haproxy 1.5-dev17
+Date: Tue, 16 Apr 2013 23:19:26 +0200
+Subject: [PATCH] Geolocation based on haproxy 1.5-dev18
 
 ---
  include/common/chunk.h     |   1 +
@@ -11,13 +11,13 @@ Subject: [PATCH] Geolocation based on haproxy 1.5-dev17
  include/types/acl.h        |   1 +
  include/types/proto_http.h |   1 +
  include/types/proxy.h      |  10 ++++
- src/acl.c                  |  65 +++++++++++++++++++++--
- src/cfgparse.c             |  86 ++++++++++++++++++++++++++++++
- src/chunk.c                |  50 ++++++++++++++++++
+ src/acl.c                  |  63 ++++++++++++++++++++-
+ src/cfgparse.c             |  88 +++++++++++++++++++++++++++++
+ src/chunk.c                |  50 +++++++++++++++++
  src/haproxy.c              |   7 +++
- src/proto_http.c           | 129 ++++++++++++++++++++++++++++++++++++++++++---
+ src/proto_http.c           | 136 ++++++++++++++++++++++++++++++++++++++++++---
  src/proto_tcp.c            |   5 +-
- 13 files changed, 347 insertions(+), 15 deletions(-)
+ 13 files changed, 354 insertions(+), 15 deletions(-)
 
 diff --git a/include/common/chunk.h b/include/common/chunk.h
 index 18f41af..4e883b5 100644
@@ -32,10 +32,10 @@ index 18f41af..4e883b5 100644
  struct chunk *get_trash_chunk(void);
  
 diff --git a/include/proto/acl.h b/include/proto/acl.h
-index 38ad604..50bd192 100644
+index 6859b3d..8c7dda5 100644
 --- a/include/proto/acl.h
 +++ b/include/proto/acl.h
-@@ -213,6 +213,10 @@ int acl_match_ip(struct sample *smp, struct acl_pattern *pattern);
+@@ -224,6 +224,10 @@ int acl_match_ip(struct sample *smp, struct acl_pattern *pattern);
   */
  int acl_match_reg(struct sample *smp, struct acl_pattern *pattern);
  
@@ -60,19 +60,19 @@ index a379909..b7f033a 100644
  #define http_msg_move_end(msg, bytes) do { \
  		unsigned int _bytes = (bytes);	\
 diff --git a/include/proto/proto_tcp.h b/include/proto/proto_tcp.h
-index d55f4c5..44646f2 100644
+index 08500db..1289179 100644
 --- a/include/proto/proto_tcp.h
 +++ b/include/proto/proto_tcp.h
-@@ -38,6 +38,7 @@ int tcp_inspect_request(struct session *s, struct channel *req, int an_bit);
+@@ -37,6 +37,7 @@ int tcp_get_dst(int fd, struct sockaddr *sa, socklen_t salen, int dir);
+ int tcp_inspect_request(struct session *s, struct channel *req, int an_bit);
  int tcp_inspect_response(struct session *s, struct channel *rep, int an_bit);
  int tcp_exec_req_rules(struct session *s);
- int smp_fetch_rdp_cookie(struct proxy *px, struct session *l4, void *l7, unsigned int opt, const struct arg *args, struct sample *smp);
 +int smp_fetch_src(struct proxy *px, struct session *l4, void *l7, unsigned int opt, const struct arg *args, struct sample *smp);
  
  /* Converts the INET/INET6 source address to a stick_table key usable for table
   * lookups. Returns either NULL if the source cannot be converted (eg: not
 diff --git a/include/types/acl.h b/include/types/acl.h
-index bf5537f..2fc9cb2 100644
+index 42e2e9c..80d7805 100644
 --- a/include/types/acl.h
 +++ b/include/types/acl.h
 @@ -77,6 +77,7 @@ enum {
@@ -82,7 +82,7 @@ index bf5537f..2fc9cb2 100644
 +	ACL_PAT_F_DICTIONARY  = 1 << 4,       /* some patterns define a dictionary (geolocation) */
  };
  
- /* what capabilities an ACL uses. These flags are set during parsing, which
+ /* ACL match methods */
 diff --git a/include/types/proto_http.h b/include/types/proto_http.h
 index 12e446f..0d2ee0d 100644
 --- a/include/types/proto_http.h
@@ -96,10 +96,10 @@ index 12e446f..0d2ee0d 100644
  	int cookie_last_date;           /* if non-zero, last date the expirable cookie was set/seen */
  
 diff --git a/include/types/proxy.h b/include/types/proxy.h
-index ceb14d1..a9dd771 100644
+index 5729db8..c55753a 100644
 --- a/include/types/proxy.h
 +++ b/include/types/proxy.h
-@@ -172,6 +172,9 @@ enum {
+@@ -173,6 +173,9 @@ enum {
  #define STK_IS_STORE	0x00000002	/* store on request fetch */
  #define STK_ON_RSP	0x00000004	/* store on response fetch */
  
@@ -109,7 +109,7 @@ index ceb14d1..a9dd771 100644
  struct error_snapshot {
  	struct timeval when;		/* date of this event, (tv_sec == 0) means "never" */
  	unsigned int len;		/* original length of the last invalid request/response */
-@@ -331,6 +334,13 @@ struct proxy {
+@@ -332,6 +335,13 @@ struct proxy {
  	unsigned int backlog;			/* force the frontend's listen backlog */
  	unsigned int bind_proc;			/* bitmask of processes using this proxy. 0 = all. */
  
@@ -124,10 +124,10 @@ index ceb14d1..a9dd771 100644
  	struct sockaddr_storage dispatch_addr;	/* the default address to connect to */
  	struct error_snapshot invalid_req, invalid_rep; /* captures of last errors */
 diff --git a/src/acl.c b/src/acl.c
-index cba89ab..1ce0df4 100644
+index efd1ee6..db2bf5c 100644
 --- a/src/acl.c
 +++ b/src/acl.c
-@@ -506,7 +506,7 @@ int acl_match_bin(struct sample *smp, struct acl_pattern *pattern)
+@@ -142,7 +142,7 @@ int acl_match_bin(struct sample *smp, struct acl_pattern *pattern)
  /* Lookup a string in the expression's pattern tree. The node is returned if it
   * exists, otherwise NULL.
   */
@@ -136,7 +136,7 @@ index cba89ab..1ce0df4 100644
  {
  	/* data are stored in a tree */
  	struct ebmb_node *node;
-@@ -788,7 +788,7 @@ int acl_match_ip(struct sample *smp, struct acl_pattern *pattern)
+@@ -424,7 +424,7 @@ int acl_match_ip(struct sample *smp, struct acl_pattern *pattern)
  /* Lookup an IPv4 address in the expression's pattern tree using the longest
   * match method. The node is returned if it exists, otherwise NULL.
   */
@@ -145,11 +145,9 @@ index cba89ab..1ce0df4 100644
  {
  	struct in_addr *s;
  
-@@ -1137,15 +1137,20 @@ int acl_parse_ip(const char **text, struct acl_pattern *pattern, int *opaque, ch
- 		 * once again is null.
+@@ -793,14 +793,18 @@ int acl_parse_ip(const char **text, struct acl_pattern *pattern, int *opaque, ch
  		 */
  		pattern->type = SMP_T_IPV4;
-+
  		if (mask + (mask & -mask) == 0 && tree) {
 +			int len = (pattern->ptr.str ? strlen(pattern->ptr.str) + 1 : 0); /* optional null terminated string length */
  			mask = mask ? 33 - flsnz(mask & -mask) : 0; /* equals cidr value */
@@ -167,7 +165,7 @@ index cba89ab..1ce0df4 100644
  			node->node.pfx = mask;
  			if (ebmb_insert_prefix(tree, node, 4) != node)
  				free(node); /* was a duplicate */
-@@ -1308,6 +1313,8 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
+@@ -961,6 +965,8 @@ static int acl_read_patterns_from_file(struct acl_expr *expr,
  	pattern = NULL;
  	args[1] = "";
  	while (fgets(trash.str, trash.size, file) != NULL) {
@@ -176,11 +174,9 @@ index cba89ab..1ce0df4 100644
  		line++;
  		c = trash.str;
  
-@@ -1319,8 +1326,15 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
- 		while (*c == ' ' || *c == '\t')
- 			c++;
+@@ -974,6 +980,14 @@ static int acl_read_patterns_from_file(struct acl_expr *expr,
  
--
+ 
  		args[0] = c;
 +		if (patflags & ACL_PAT_F_DICTIONARY) {
 +			while (*c && *c != '\n' && *c != '\r' && *c != '\t' && *c != ' ')
@@ -193,22 +189,20 @@ index cba89ab..1ce0df4 100644
  		while (*c && *c != '\n' && *c != '\r')
  			c++;
  		*c = 0;
-@@ -1339,7 +1353,9 @@ static int acl_read_patterns_from_file(	struct acl_keyword *aclkw,
- 
+@@ -993,6 +1007,9 @@ static int acl_read_patterns_from_file(struct acl_expr *expr,
  		memset(pattern, 0, sizeof(*pattern));
  		pattern->flags = patflags;
--
+ 
 +		if (value) {
 +			pattern->ptr.str = strdup(value);
 +		}
- 		if ((aclkw->requires & ACL_MAY_LOOKUP) && !(pattern->flags & ACL_PAT_F_IGNORE_CASE)) {
+ 		if (!(pattern->flags & ACL_PAT_F_IGNORE_CASE) &&
+ 		    (expr->match == acl_match_str || expr->match == acl_match_ip)) {
  			/* we pre-set the data pointer to the tree's head so that functions
- 			 * which are able to insert in a tree know where to do that.
-@@ -2282,6 +2298,45 @@ acl_find_targets(struct proxy *p)
- 	return cfgerr;
+@@ -1929,6 +1946,46 @@ int init_acl()
+ 	return err;
  }
  
-+
 +/*
 + * Initialize a specific acl expression used for geolocation.
 + */
@@ -228,15 +222,17 @@ index cba89ab..1ce0df4 100644
 +		return 0;
 +	}
 +
-+	expr->kw = aclkw;
-+	aclkw->use_cnt++;
++	expr->kw = aclkw->kw;
 +	LIST_INIT(&expr->patterns);
 +	expr->pattern_tree = EB_ROOT_UNIQUE;
++	expr->parse = aclkw->parse;
++	expr->match = aclkw->match;
 +	expr->args = empty_arg_list;
++	expr->smp = aclkw->smp;
 +
 +	*geolocate = expr;
 +
-+	return acl_read_patterns_from_file(expr->kw, expr, filename, ACL_PAT_F_FROM_FILE | ACL_PAT_F_DICTIONARY, err);
++	return acl_read_patterns_from_file(expr, filename, ACL_PAT_F_FROM_FILE | ACL_PAT_F_DICTIONARY, err);
 +}
 +
 +/*
@@ -248,13 +244,13 @@ index cba89ab..1ce0df4 100644
 +}
 +
  /************************************************************************/
- /*             All supported keywords must be declared here.            */
+ /*       All supported sample fetch functions must be declared here     */
  /************************************************************************/
 diff --git a/src/cfgparse.c b/src/cfgparse.c
-index abcb9c5..b058477 100644
+index 49a91c0..ec4b505 100644
 --- a/src/cfgparse.c
 +++ b/src/cfgparse.c
-@@ -5371,6 +5371,92 @@ stats_error_parsing:
+@@ -5583,6 +5583,94 @@ stats_error_parsing:
  				goto out;
  		}
  	}
@@ -335,7 +331,9 @@ index abcb9c5..b058477 100644
 +				err_code |= ERR_ALERT | ERR_FATAL;
 +				goto out;
 +			}
-+			err_code |= warnif_cond_requires_resp(cond, file, linenum);
++			err_code |= warnif_cond_conflicts(curproxy->geolocate_cond,
++			                                  (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
++			                                  file, linenum);
 +		}
 +		else if (*args[cur_arg]) {
 +			Alert("parsing [%s:%d] : '%s' : Expecting nothing, 'if', or 'unless', got '%s'.\n",
@@ -409,10 +407,10 @@ index 9463abb..551f3e4 100644
   * Local variables:
   *  c-indent-level: 8
 diff --git a/src/haproxy.c b/src/haproxy.c
-index 0d826d2..138a03a 100644
+index dd1adcd..721eb6e 100644
 --- a/src/haproxy.c
 +++ b/src/haproxy.c
-@@ -1024,6 +1024,13 @@ void deinit(void)
+@@ -1040,6 +1040,13 @@ void deinit(void)
  		deinit_stick_rules(&p->storersp_rules);
  		deinit_stick_rules(&p->sticking_rules);
  
@@ -427,10 +425,10 @@ index 0d826d2..138a03a 100644
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index aaa9476..d4922bd 100644
+index ff71659..43d6068 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
-@@ -3141,10 +3141,11 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct session
+@@ -3149,10 +3149,11 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct session
   * returns non-zero on success, or zero in case of a, irrecoverable error such
   * as too large a request to build a valid response.
   */
@@ -443,7 +441,7 @@ index aaa9476..d4922bd 100644
  
  	/* build redirect message */
  	switch(rule->code) {
-@@ -3162,6 +3163,8 @@ static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *
+@@ -3176,6 +3177,8 @@ static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *
  
  	if (unlikely(!chunk_strcpy(&trash, msg_fmt)))
  		return 0;
@@ -452,7 +450,7 @@ index aaa9476..d4922bd 100644
  
  	switch(rule->type) {
  	case REDIRECT_TYPE_SCHEME: {
-@@ -3290,6 +3293,10 @@ static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *
+@@ -3304,6 +3307,10 @@ static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *
  		break;
  	}
  
@@ -463,7 +461,7 @@ index aaa9476..d4922bd 100644
  	if (rule->cookie_len) {
  		memcpy(trash.str + trash.len, "\r\nSet-Cookie: ", 14);
  		trash.len += 14;
-@@ -3354,6 +3361,80 @@ static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *
+@@ -3368,6 +3375,81 @@ static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *
  	return 1;
  }
  
@@ -494,6 +492,7 @@ index aaa9476..d4922bd 100644
 +			if (ret) {
 +				struct sample smp;
 +				smp.type = SMP_TYPES; /* default value used to detect non matches */
++				smp.ctx.a[0] = NULL;
 +				if (px->geoloc_options & GEOLOC_SRC) {
 +					struct arg args[0];
 +					smp_fetch_src(px, s, txn, SMP_OPT_DIR_REQ, args, &smp);
@@ -523,7 +522,7 @@ index aaa9476..d4922bd 100644
 +						struct acl_pattern *pattern;
 +						/* call the match() function for all tests on this value */
 +						list_for_each_entry(pattern, &px->geolocate->patterns, list) {
-+							if (px->geolocate->kw->match(&smp, pattern)) {
++							if (px->geolocate->match(&smp, pattern)) {
 +								txn->geoloc = pattern->ptr.str;
 +								break;
 +							}
@@ -544,7 +543,7 @@ index aaa9476..d4922bd 100644
  /* This stream analyser runs all HTTP request processing which is common to
   * frontends and backends, which means blocking ACLs, filters, connection-close,
   * reqadd, stats and redirects. This is performed for the designated proxy.
-@@ -3370,6 +3451,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3384,6 +3466,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  	struct redirect_rule *rule;
  	struct cond_wordlist *wl;
  	int do_stats;
@@ -552,7 +551,7 @@ index aaa9476..d4922bd 100644
  
  	if (unlikely(msg->msg_state < HTTP_MSG_BODY)) {
  		/* we need more data */
-@@ -3570,6 +3652,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3584,6 +3667,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  		goto return_prx_cond;
  	}
  
@@ -561,7 +560,7 @@ index aaa9476..d4922bd 100644
  	/* add request headers from the rule sets in the same order */
  	list_for_each_entry(wl, &px->req_add, list) {
  		if (wl->cond) {
-@@ -3586,7 +3670,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3600,7 +3685,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  	}
  
  	if (http_req_last_rule && http_req_last_rule->action == HTTP_REQ_ACT_REDIR) {
@@ -570,7 +569,7 @@ index aaa9476..d4922bd 100644
  			goto return_bad_req;
  		req->analyse_exp = TICK_ETERNITY;
  		return 1;
-@@ -3614,7 +3698,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
+@@ -3628,7 +3713,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit,
  			if (!ret)
  				continue;
  		}
@@ -579,7 +578,15 @@ index aaa9476..d4922bd 100644
  			goto return_bad_req;
  
  		req->analyse_exp = TICK_ETERNITY;
-@@ -8001,7 +8085,7 @@ void http_end_txn(struct session *s)
+@@ -7932,6 +8017,7 @@ unsigned int http_get_hdr(const struct http_msg *msg, const char *hname, int hle
+ 		hist_ptr -= MAX_HDR_HISTORY;
+ 	*vptr = ptr_hist[hist_ptr];
+ 	*vlen = len_hist[hist_ptr];
++
+ 	return 1;
+ }
+ 
+@@ -8023,7 +8109,7 @@ void http_end_txn(struct session *s)
  	txn->uri = NULL;
  	txn->srv_cookie = NULL;
  	txn->cli_cookie = NULL;
@@ -588,7 +595,18 @@ index aaa9476..d4922bd 100644
  	if (txn->req.cap) {
  		struct cap_hdr *h;
  		for (h = s->fe->req_cap; h; h = h->next)
-@@ -8735,9 +8819,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
+@@ -8713,8 +8799,9 @@ smp_fetch_hdr(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+ 
+ 	smp->type = SMP_T_CSTR;
+ 	smp->flags |= SMP_F_VOL_HDR;
+-	if (http_get_hdr(msg, name_str, name_len, idx, occ, ctx, &smp->data.str.str, &smp->data.str.len))
++	if (http_get_hdr(msg, name_str, name_len, idx, occ, ctx, &smp->data.str.str, &smp->data.str.len)) {
+ 		return 1;
++	}
+ 
+ 	smp->flags &= ~SMP_F_NOT_LAST;
+ 	return 0;
+@@ -8772,9 +8859,8 @@ smp_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, unsigned int o
   * and an optional one of type int to designate a specific occurrence.
   * It returns an IPv4 or IPv6 address.
   */
@@ -600,7 +618,15 @@ index aaa9476..d4922bd 100644
  {
  	int ret;
  
-@@ -8924,6 +9007,35 @@ smp_fetch_base32_src(struct proxy *px, struct session *l4, void *l7, unsigned in
+@@ -8793,7 +8879,6 @@ smp_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, unsigned int op
+ 				}
+ 			}
+ 		}
+-
+ 		/* if the header doesn't match an IP address, fetch next one */
+ 		if (!(smp->flags & SMP_F_NOT_LAST))
+ 			return 0;
+@@ -8961,6 +9046,35 @@ smp_fetch_base32_src(struct proxy *px, struct session *l4, void *l7, unsigned in
  	return 1;
  }
  
@@ -634,31 +660,32 @@ index aaa9476..d4922bd 100644
 +}
 +
  static int
- acl_fetch_proto_http(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+ smp_fetch_proto_http(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
                       const struct arg *args, struct sample *smp)
-@@ -9457,6 +9569,8 @@ static struct acl_kw_list acl_kws = {{ },{
- 	{ "cook_sub",        acl_parse_str,     smp_fetch_cookie,         acl_match_sub,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
- 	{ "cook_val",        acl_parse_int,     smp_fetch_cookie_val,     acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
+@@ -9501,6 +9615,8 @@ static struct acl_kw_list acl_kws = {{ },{
+ 	{ "cook_sub",        "req.cook",      acl_parse_str,     acl_match_sub     },
+ 	{ "cook_val",        "req.cook_val",  acl_parse_int,     acl_match_int     },
  
-+	{ "geoloc",          acl_parse_str,     smp_fetch_geoloc,         acl_match_geoloc,  ACL_USE_L7REQ_VOLATILE|ACL_MAY_LOOKUP, 0 },
++	{ "geoloc",          "geoloc",        acl_parse_str,     acl_match_geoloc  },
 +
- 	{ "hdr",             acl_parse_str,     smp_fetch_hdr,            acl_match_str,     ACL_USE_L7REQ_VOLATILE|ACL_MAY_LOOKUP, ARG2(0,STR,SINT), val_hdr },
- 	{ "hdr_beg",         acl_parse_str,     smp_fetch_hdr,            acl_match_beg,     ACL_USE_L7REQ_VOLATILE, ARG2(0,STR,SINT), val_hdr },
- 	{ "hdr_cnt",         acl_parse_int,     smp_fetch_hdr_cnt,        acl_match_int,     ACL_USE_L7REQ_VOLATILE, ARG1(0,STR) },
-@@ -9547,6 +9661,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {{ },{
- 	{ "base",       smp_fetch_base,           0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
- 	{ "base32",     smp_fetch_base32,         0,                NULL,    SMP_T_UINT, SMP_CAP_L7|SMP_CAP_REQ },
- 	{ "base32+src", smp_fetch_base32_src,     0,                NULL,    SMP_T_BIN,  SMP_CAP_L7|SMP_CAP_REQ },
-+	{ "geoloc",     smp_fetch_geoloc,         0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
- 	{ "path",       smp_fetch_path,           0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
- 	{ "url",        smp_fetch_url,            0,                NULL,    SMP_T_CSTR, SMP_CAP_L7|SMP_CAP_REQ },
- 	{ "url_ip",     smp_fetch_url_ip,         0,                NULL,    SMP_T_IPV4, SMP_CAP_L7|SMP_CAP_REQ },
+ 	{ "hdr",             "req.hdr",       acl_parse_str,     acl_match_str     },
+ 	{ "hdr_beg",         "req.hdr",       acl_parse_str,     acl_match_beg     },
+ 	{ "hdr_cnt",         "req.hdr_cnt",   acl_parse_int,     acl_match_int     },
+@@ -9601,6 +9717,8 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {{ },{
+ 	{ "cook_cnt",        smp_fetch_cookie_cnt,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRQHV },
+ 	{ "cook_val",        smp_fetch_cookie_val,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRQHV },
+ 
++	{ "geoloc",          smp_fetch_geoloc,         0,                NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
++
+ 	/* hdr is valid in both directions (eg: for "stick ...") but hdr_* are
+ 	 * only here to match the ACL's name, are request-only and are used for
+ 	 * ACL compatibility only.
 diff --git a/src/proto_tcp.c b/src/proto_tcp.c
-index 7285457..1c7aeca 100644
+index 781b24a..171a6c0 100644
 --- a/src/proto_tcp.c
 +++ b/src/proto_tcp.c
-@@ -1509,9 +1509,8 @@ acl_fetch_rdp_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigne
- 
+@@ -1445,9 +1445,8 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
+ /************************************************************************/
  
  /* fetch the connection's source IPv4/IPv6 address */
 -static int
@@ -670,5 +697,5 @@ index 7285457..1c7aeca 100644
  	switch (l4->si[0].conn->addr.from.ss_family) {
  	case AF_INET:
 -- 
-1.8.0
+1.8.1.2
 
