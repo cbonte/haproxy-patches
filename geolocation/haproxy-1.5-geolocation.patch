@@ -1,6 +1,6 @@
-From 107f7dec7ddd66df36d024efb59cd27f9285843a Mon Sep 17 00:00:00 2001
+From b0ed0615b148d1ee261c018011e0770b684d38f2 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Mon, 17 Jun 2013 19:49:34 +0200
+Date: Mon, 17 Jun 2013 22:36:19 +0200
 Subject: [PATCH] Geolocation based on haproxy 1.5-dev19
 
 ---
@@ -124,7 +124,7 @@ index e6bc755..c25abe0 100644
  	struct sockaddr_storage dispatch_addr;	/* the default address to connect to */
  	struct error_snapshot invalid_req, invalid_rep; /* captures of last errors */
 diff --git a/src/acl.c b/src/acl.c
-index 664ef5c..27ae3ce 100644
+index 664ef5c..a37a26e 100644
 --- a/src/acl.c
 +++ b/src/acl.c
 @@ -142,7 +142,7 @@ int acl_match_bin(struct sample *smp, struct acl_pattern *pattern)
@@ -207,11 +207,11 @@ index 664ef5c..27ae3ce 100644
 + * Initialize a specific acl expression used for geolocation.
 + */
 +int init_geolocate(char *filename, struct acl_expr **geolocate, char **err) {
-+	struct acl_keyword *aclkw;
++	struct sample_fetch *smp;
 +	struct acl_expr *expr;
 +
-+	aclkw = find_acl_kw("src");
-+	if (!aclkw) {
++	smp = find_sample_fetch("src", 3);
++	if (!smp) {
 +		memprintf(err, "unable to find internal acl keyword while loading geoloc dictionary");
 +		return 0;
 +	}
@@ -222,13 +222,13 @@ index 664ef5c..27ae3ce 100644
 +		return 0;
 +	}
 +
-+	expr->kw = aclkw->kw;
++	expr->kw = smp->kw;
 +	LIST_INIT(&expr->patterns);
 +	expr->pattern_tree = EB_ROOT_UNIQUE;
-+	expr->parse = aclkw->parse;
-+	expr->match = aclkw->match;
++	expr->parse = acl_parse_fcts[ACL_MATCH_IP];
++	expr->match = acl_match_fcts[ACL_MATCH_IP];
 +	expr->args = empty_arg_list;
-+	expr->smp = aclkw->smp;
++	expr->smp = smp;
 +
 +	*geolocate = expr;
 +
