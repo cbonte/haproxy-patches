@@ -1,7 +1,7 @@
-From af2038557a14bf6e2915bed545e216a0f1a95fc5 Mon Sep 17 00:00:00 2001
+From deff8373c350eca335a7b64bb89e77695d1fcc5a Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Mon, 15 Apr 2013 22:05:00 +0200
-Subject: [PATCH] Proxy Protocol based on haproxy 1.4.23
+Date: Mon, 17 Jun 2013 19:42:10 +0200
+Subject: [PATCH] Proxy Protocol based on haproxy 1.4.24
 
 ---
  doc/configuration.txt     |  26 ++++++-
@@ -17,7 +17,7 @@ Subject: [PATCH] Proxy Protocol based on haproxy 1.4.23
  10 files changed, 275 insertions(+), 19 deletions(-)
 
 diff --git a/doc/configuration.txt b/doc/configuration.txt
-index ad07553..3ba7dba 100644
+index 6e0add7..ab33bd9 100644
 --- a/doc/configuration.txt
 +++ b/doc/configuration.txt
 @@ -1343,6 +1343,7 @@ bind [<address>]:<port_range> [, ...] transparent
@@ -427,7 +427,7 @@ index 1fa9aa4..6c7ed13 100644
   * SN_FRT_ADDR_SET flag.
   */
 diff --git a/src/proto_http.c b/src/proto_http.c
-index a768eb5..1836a4c 100644
+index a63d65d..20c0c71 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
 @@ -4156,7 +4156,8 @@ void http_end_txn_clean_session(struct session *s)
@@ -440,7 +440,7 @@ index a768eb5..1836a4c 100644
  	s->rep->analysers = 0;
  
  	http_silent_debug(__LINE__, s);
-@@ -7739,7 +7740,6 @@ void http_reset_txn(struct session *s)
+@@ -7741,7 +7742,6 @@ void http_reset_txn(struct session *s)
  	http_init_txn(s);
  
  	s->be = s->fe;
@@ -505,5 +505,5 @@ index 31fea91..0bb58b3 100644
  	dig1 = dig10 = dig100 = ascii_zero;
  	s = 24;
 -- 
-1.8.1.2
+1.8.3.1
 

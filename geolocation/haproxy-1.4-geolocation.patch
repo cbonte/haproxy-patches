@@ -1,7 +1,7 @@
-From 8220f9dac23f370e5d0bcf0b43e5264f35934aaf Mon Sep 17 00:00:00 2001
+From 2d5b95ab8b3306a0e1ad336efcc76e4344a22bcb Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Cyril=20Bont=C3=A9?= <cyril.bonte@free.fr>
-Date: Mon, 15 Apr 2013 22:06:00 +0200
-Subject: [PATCH] Geolocation based on haproxy 1.4.23
+Date: Mon, 17 Jun 2013 19:44:18 +0200
+Subject: [PATCH] Geolocation based on haproxy 1.4.24
 
 ---
  include/proto/acl.h        |   4 ++
@@ -394,7 +394,7 @@ index 7a09e3f..ea45703 100644
  
  		h = p->req_cap;
 diff --git a/src/proto_http.c b/src/proto_http.c
-index a768eb5..c400a83 100644
+index a63d65d..7229f39 100644
 --- a/src/proto_http.c
 +++ b/src/proto_http.c
 @@ -3085,6 +3085,81 @@ int http_process_req_stat_post(struct session *s, struct buffer *req)
@@ -523,7 +523,7 @@ index a768eb5..c400a83 100644
  			if (rule->cookie_len) {
  				memcpy(rdr.str + rdr.len, "\r\nSet-Cookie: ", 14);
  				rdr.len += 14;
-@@ -7715,6 +7799,7 @@ void http_end_txn(struct session *s)
+@@ -7717,6 +7801,7 @@ void http_end_txn(struct session *s)
  	txn->uri = NULL;
  	txn->srv_cookie = NULL;
  	txn->cli_cookie = NULL;
@@ -531,7 +531,7 @@ index a768eb5..c400a83 100644
  
  	if (txn->req.cap) {
  		struct cap_hdr *h;
-@@ -8254,9 +8339,8 @@ acl_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, char *sol,
+@@ -8256,9 +8341,8 @@ acl_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, char *sol,
  	return 0;
  }
  
@@ -543,7 +543,7 @@ index a768eb5..c400a83 100644
  {
  	struct http_txn *txn = l7;
  
-@@ -8435,6 +8519,37 @@ acl_fetch_http_auth(struct proxy *px, struct session *s, void *l7, int dir,
+@@ -8437,6 +8521,37 @@ acl_fetch_http_auth(struct proxy *px, struct session *s, void *l7, int dir,
  	return 1;
  }
  
@@ -581,7 +581,7 @@ index a768eb5..c400a83 100644
  /************************************************************************/
  /*             All supported keywords must be declared here.            */
  /************************************************************************/
-@@ -8515,6 +8630,9 @@ static struct acl_kw_list acl_kws = {{ },{
+@@ -8517,6 +8632,9 @@ static struct acl_kw_list acl_kws = {{ },{
  	{ "http_auth",       acl_parse_nothing, acl_fetch_http_auth, acl_match_auth, ACL_USE_L7REQ_PERMANENT },
  	{ "http_auth_group", acl_parse_strcat,  acl_fetch_http_auth, acl_match_auth, ACL_USE_L7REQ_PERMANENT },
  	{ "http_first_req",  acl_parse_nothing, acl_fetch_http_first_req, acl_match_nothing, ACL_USE_L7REQ_PERMANENT },
@@ -592,5 +592,5 @@ index a768eb5..c400a83 100644
  }};
  
 -- 
-1.8.1.2
+1.8.3.1
 
